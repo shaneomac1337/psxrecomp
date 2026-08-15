@@ -44,6 +44,9 @@ void vk_renderer_present_blank(void){}
 void vk_renderer_sync_cpu(void){}
 void vk_renderer_restage_vram_after_savestate(void){}
 void vk_renderer_set_present_mode(int m){(void)m;}
+int  vk_renderer_vram_diff(uint32_t*n,int b[4],int s[8][2],uint16_t p[8][2])
+     {(void)n;(void)b;(void)s;(void)p;return 0;}
+void vk_renderer_diag(int *gpu_dirty){ if(gpu_dirty) *gpu_dirty = 0; }
 int  vk_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"[]"):0;}
 const GpuRenderBackend *vk_backend_get(void) { return 0; }
 
@@ -2338,6 +2341,74 @@ static void ensure_cpu(void) {
     memcpy(s_vram, map, (size_t)VRAM_W * VRAM_H * 2);
     free_staging(buf, mem);
     s_gpu_dirty = 0;
+}
+
+/* Diagnostic (debug server "vk_vram_diff"): full-VRAM comparison of the
+ * GPU-side truth (raw mirror via pack) against the CPU array, WITHOUT writing
+ * either — the Vulkan counterpart of gl_renderer_vram_diff(). Reports mismatch
+ * count + bounding box + a few spread samples.
+ *
+ * This is what separates "the VRAM image itself is wrong" from "the present
+ * blit samples a correct image". ensure_cpu() cannot answer that question: it
+ * memcpy's the readback straight into s_vram, so afterwards the two agree by
+ * construction. Here the readback lands in a scratch buffer and s_vram is left
+ * untouched.
+ *
+ * Divergence is expected while the GPU is legitimately ahead (gpu_dirty); at
+ * upload-only scenes the two must match exactly. */
+int vk_renderer_vram_diff(uint32_t *count, int bbox[4],
+                          int samples[8][2], uint16_t samples_px[8][2]) {
+    if (!s_ready || !s_vram) return 0;
+    flush_cpu_upload();
+    flush_tex_batch(); flush_geometry();
+    /* Force a full pack for the same reason ensure_cpu() does: an incremental
+     * s_pack_dirty rect would leave the raw mirror stale outside it, and a
+     * stale mirror is exactly what this tool has to be able to see. */
+    rect_add(&s_pack_dirty, 0, 0, VRAM_W - 1, VRAM_H - 1);
+    pack_flush();
+
+    VkBuffer buf; VkDeviceMemory mem; void *map;
+    if (!make_staging((VkDeviceSize)VRAM_W * VRAM_H * 2, &buf, &mem, &map))
+        return 0;
+    VkCommandBuffer cb = begin_oneshot();
+    img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy rc = {0};
+    rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    rc.imageSubresource.layerCount = 1;
+    rc.imageExtent.width = VRAM_W; rc.imageExtent.height = VRAM_H;
+    rc.imageExtent.depth = 1;
+    p_vkCmdCopyImageToBuffer(cb, s_raw_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             buf, 1, &rc);
+    img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_oneshot(cb);
+    gpu_sync();   /* the readback must be complete before we read it */
+
+    const uint16_t *gpu = (const uint16_t *)map;
+    uint32_t n = 0;
+    int x0 = VRAM_W, y0 = VRAM_H, x1 = -1, y1 = -1, ns = 0;
+    for (int y = 0; y < VRAM_H; y++) {
+        for (int x = 0; x < VRAM_W; x++) {
+            uint16_t g = gpu[y * VRAM_W + x], c = s_vram[y * VRAM_W + x];
+            if (g == c) continue;
+            n++;
+            if (x < x0) x0 = x; if (x > x1) x1 = x;
+            if (y < y0) y0 = y; if (y > y1) y1 = y;
+            if (ns < 8 && (n % 977) == 1) {  /* spread samples */
+                samples[ns][0] = x; samples[ns][1] = y;
+                samples_px[ns][0] = g; samples_px[ns][1] = c;
+                ns++;
+            }
+        }
+    }
+    free_staging(buf, mem);
+    *count = n;
+    bbox[0] = x0; bbox[1] = y0; bbox[2] = x1; bbox[3] = y1;
+    return 1 + ns;  /* >=1 means valid; ns = samples filled */
+}
+
+/* Diagnostic state for the debug server: GPU-ahead flag. */
+void vk_renderer_diag(int *gpu_dirty) {
+    if (gpu_dirty) *gpu_dirty = s_gpu_dirty;
 }
 
 /* ---- backend vtable ---------------------------------------------------- */

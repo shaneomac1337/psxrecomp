@@ -53,6 +53,15 @@ void vk_renderer_restage_vram_after_savestate(void);
  * frames; unsupported modes fall back to FIFO (always available). */
 void vk_renderer_set_present_mode(int mode);
 
+/* Diagnostic: full-VRAM GPU-vs-CPU comparison that writes neither side.
+ * Counterpart of gl_renderer_vram_diff(). Returns 0 when the Vulkan pipeline
+ * is inactive, else 1 + the number of samples filled. */
+int  vk_renderer_vram_diff(uint32_t *count, int bbox[4],
+                           int samples[8][2], uint16_t samples_px[8][2]);
+
+/* Diagnostic: GPU-ahead flag, for interpreting a vram_diff result. */
+void vk_renderer_diag(int *gpu_dirty);
+
 #ifdef __cplusplus
 }
 #endif

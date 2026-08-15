@@ -8900,6 +8900,36 @@ static void handle_gl_vram_diff(int id, const char *json)
              id, n, bbox[0], bbox[1], bbox[2], bbox[3], gpu_dirty, smp);
 }
 
+extern int  vk_renderer_vram_diff(uint32_t *count, int bbox[4],
+                                  int samples[8][2], uint16_t samples_px[8][2]);
+extern void vk_renderer_diag(int *gpu_dirty);
+
+/* Vulkan counterpart of gl_vram_diff: compares GPU-side VRAM truth against the
+ * CPU array without writing either. Separates "the VRAM image is wrong" from
+ * "the present blit samples a correct image" — the question screenshots cannot
+ * answer, because a correct-looking destination rect can still be fed garbage. */
+static void handle_vk_vram_diff(int id, const char *json)
+{
+    (void)json;
+    uint32_t n = 0;
+    int bbox[4] = {0}, samples[8][2] = {{0}};
+    uint16_t spx[8][2] = {{0}};
+    int r = vk_renderer_vram_diff(&n, bbox, samples, spx);
+    if (!r) { send_err(id, "Vulkan pipeline inactive"); return; }
+    int ns = r - 1;
+    int gpu_dirty = 0;
+    vk_renderer_diag(&gpu_dirty);
+    char smp[512]; int pos = 0; smp[0] = 0;
+    for (int i = 0; i < ns; i++)
+        pos += snprintf(smp + pos, sizeof(smp) - pos,
+                        "%s[%d,%d,\"0x%04X\",\"0x%04X\"]", i ? "," : "",
+                        samples[i][0], samples[i][1], spx[i][0], spx[i][1]);
+    send_fmt("{\"id\":%d,\"ok\":true,\"mismatches\":%u,"
+             "\"bbox\":[%d,%d,%d,%d],\"gpu_dirty\":%d,"
+             "\"samples_xy_gpu_cpu\":[%s]}",
+             id, n, bbox[0], bbox[1], bbox[2], bbox[3], gpu_dirty, smp);
+}
+
 /* GL-backend coherency event ring: dump the last n events (default 200),
  * optionally only events from frame >= frame_min. Always-on capture; this
  * just reads a window. */
@@ -13190,6 +13220,7 @@ static const CmdEntry s_commands[] = {
     { "synth_recurse",     handle_synth_recurse },
     { "gl_fbo_peek",       handle_gl_fbo_peek },
     { "gl_vram_diff",      handle_gl_vram_diff },
+    { "vk_vram_diff",      handle_vk_vram_diff },
     { "irq_state",         handle_irq_state },
     { "vblank_rate",       handle_vblank_rate },
     { "cycles_to_next_event", handle_cycles_to_next_event },
