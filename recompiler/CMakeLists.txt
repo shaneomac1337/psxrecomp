@@ -413,6 +413,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/../tools/tests/test_stall_report.py
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+        add_test(
+            NAME migrate_preserve_exe_name
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/tests/test_migrate_preserve_exe_name.py
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
         # ---- codegen tests that were written but never registered -----------
         # These existed in recompiler/tests/ with no add_test() entry, so they

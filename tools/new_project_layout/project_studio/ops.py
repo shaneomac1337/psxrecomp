@@ -183,6 +183,10 @@ def _resolve_tokens(root: Path, options: MigrateOptions) -> dict[str, str]:
             detected = players_from_game_toml(root / "game.toml")
             if detected is not None:
                 players = detected
+    # Preserve an explicit EXE_NAME so a migration never renames the binary.
+    from .naming import exe_name_from_cmake
+
+    exe_name = exe_name_from_cmake(root / "CMakeLists.txt")
     title = options.window_title or window_title_from_cmake(root / "CMakeLists.txt")
     if not title:
         # Prefer game.toml window_title
@@ -221,6 +225,7 @@ def _resolve_tokens(root: Path, options: MigrateOptions) -> dict[str, str]:
         enable_wizard=options.enable_wizard if options.enable_recomp_ui else False,
         enable_netplay=enable_netplay if options.enable_recomp_ui else False,
         has_boxart=has_boxart,
+        exe_name=exe_name,
     )
 
 

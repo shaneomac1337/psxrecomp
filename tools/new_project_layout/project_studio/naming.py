@@ -199,6 +199,22 @@ def window_title_from_cmake(cmake: Path) -> str | None:
     return m.group(1) if m else None
 
 
+def exe_name_from_cmake(cmake: Path) -> str | None:
+    """Preserve an explicit EXE_NAME across a migration.
+
+    Without this the rewritten CMakeLists carries no EXE_NAME, so the runtime
+    derives the binary name from WINDOW_TITLE — silently renaming a migrated
+    project's executable (e.g. SmackDown2Recomp.exe ->
+    WWF_SmackDown_2_Recompiled.exe) and breaking every script, harness, and doc
+    that refers to it.
+    """
+    if not cmake.is_file():
+        return None
+    text = cmake.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r'EXE_NAME\s+"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
 def infer_project_name(root: Path) -> str:
     return root.name
 
@@ -220,6 +236,7 @@ def build_token_map(
     enable_wizard: bool = True,
     enable_netplay: bool = False,
     has_boxart: bool = False,
+    exe_name: str | None = None,
 ) -> dict[str, str]:
     cmake_name = project_cmake_name(name)
     title = window_title or window_title_from_name(name)
@@ -286,8 +303,19 @@ def build_token_map(
         '    APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico"'
     )
 
+    # Pinned only when the project already pinned one — migrations must not
+    # rename the binary. New projects keep deriving it from WINDOW_TITLE, with
+    # a commented knob so the option is discoverable.
+    exe_name_arg = (
+        f'    EXE_NAME "{exe_name}"'
+        if exe_name
+        else f'    # EXE_NAME "{exe_basename(title)}"  # pin to decouple the'
+             " binary name from WINDOW_TITLE"
+    )
+
     return {
         "PROJECT_CMAKE_NAME": cmake_name,
+        "EXE_NAME_CMAKE_ARG": exe_name_arg,
         "WINDOW_TITLE": title,
         "BOOT_EXE": boot_exe,
         "GAME_NAME": game,
