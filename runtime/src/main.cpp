@@ -25,6 +25,9 @@
 #include "savestate.h"
 #include "psx_rewind.h"
 #include "psx_savestate_menu.h"
+#if defined(PSX_HAVE_INGAME_MENU)
+#include "psx_ingame_menu.h"
+#endif
 #include "host_osd.h"
 #include "host_keymap.h"
 #include "png_write.h"       /* png_write_rgb — present_shot readback */
@@ -6546,6 +6549,187 @@ static void savestate_menu_host_pause_loop(void) {
     savestate_input_guard_arm();
 }
 
+#if defined(PSX_HAVE_INGAME_MENU)
+/* ---- In-game pause menu (Esc / PS button) ---------------------------------
+ * psx_ingame_menu.cpp draws the recomp-ui menu over the frozen frame; this is
+ * the host side: open requests, the pause loop, input translation and the
+ * live settings the items change. Vulkan present path only. */
+static int g_ingame_menu_request = 0;
+static void ingame_menu_save_settings(void);   /* after the launcher globals */
+static void ingame_menu_open_launcher(void);
+
+static int ingame_menu_get_fullscreen(void) {
+    return sdl_window && (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
+}
+static void ingame_menu_set_fullscreen(int on) {
+    if (!sdl_window) return;
+    if (!on) {
+        SDL_SetWindowFullscreen(sdl_window, 0);
+        return;
+    }
+    Uint32 target = psx_fullscreen_flag_for_mode(g_fullscreen);
+    if (target == 0) target = SDL_WINDOW_FULLSCREEN_DESKTOP;
+    SDL_SetWindowFullscreen(sdl_window, target);
+}
+static int ingame_menu_get_screen_kind(void) { return g_video_screen; }
+static void ingame_menu_set_screen_kind(int kind) {
+    g_video_screen = kind < 0 ? 0 : kind > 3 ? 3 : kind;
+    gpu_set_screen_kind(g_video_screen);
+}
+static int ingame_menu_get_volume(void) { return host_volume_get(); }
+static void ingame_menu_set_volume(int percent) { host_volume_set(percent); }
+static void ingame_menu_open_save_states(void) {
+    if (!savestate_menu_open) savestate_menu_toggle(0);
+    /* Opened from the menu, not by a held hotkey: nothing to wait for. */
+    savestate_menu_ignore_toggle_release = 0;
+}
+static void ingame_menu_quit(void) {
+    psx_crash_trace_set_exit_origin("ingame_menu_quit");
+    shutdown_runtime();
+    std::exit(0);
+}
+
+static void ingame_menu_configure(const std::string& title) {
+    static const PsxIngameMenuHost host = {
+        ingame_menu_get_fullscreen,  ingame_menu_set_fullscreen,
+        ingame_menu_get_screen_kind, ingame_menu_set_screen_kind,
+        ingame_menu_get_volume,      ingame_menu_set_volume,
+        ingame_menu_open_save_states, ingame_menu_open_launcher,
+        ingame_menu_quit,            ingame_menu_save_settings,
+    };
+    const std::filesystem::path font =
+        exe_dir_from_argv(nullptr) / "assets" / "fonts" / "LatoLatin-Regular.ttf";
+    psx_ingame_menu_configure(&host, title.c_str(), font.string().c_str());
+}
+
+/* PS / Guide button opens the menu from gameplay (edge-triggered). */
+static void ingame_menu_poll_open_button(void) {
+    static int was_down;
+    SDL_GameController *h = g_players[0].handle;
+    const int down = h && SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_GUIDE);
+    if (down && !was_down && !psx_netplay_active()) g_ingame_menu_request = 1;
+    was_down = down;
+}
+
+/* Held-direction auto-repeat for pad navigation. */
+struct IngameMenuPadNav {
+    int held = -1;
+    uint32_t next_ms = 0;
+    int prev_accept = 1, prev_back = 1, prev_close = 1;  /* 1: ignore the opening press */
+};
+
+static void ingame_menu_poll_pad(IngameMenuPadNav& nav, uint32_t now_ms) {
+    int dir = -1, accept = 0, back = 0, close = 0;
+    SDL_GameController *h = g_players[0].handle;
+    if (h) {
+        const int dz = 16000;
+        const Sint16 lx = SDL_GameControllerGetAxis(h, SDL_CONTROLLER_AXIS_LEFTX);
+        const Sint16 ly = SDL_GameControllerGetAxis(h, SDL_CONTROLLER_AXIS_LEFTY);
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_UP) || ly < -dz)
+            dir = PSX_MENU_INPUT_UP;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || ly > dz)
+            dir = PSX_MENU_INPUT_DOWN;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_LEFT) || lx < -dz)
+            dir = PSX_MENU_INPUT_LEFT;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || lx > dz)
+            dir = PSX_MENU_INPUT_RIGHT;
+        accept = SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_A);
+        back = SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_B);
+        close = SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_GUIDE) ||
+                SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_START);
+    }
+    if (accept && !nav.prev_accept) psx_ingame_menu_input(PSX_MENU_INPUT_ACCEPT, 1, 0);
+    if (back && !nav.prev_back)     psx_ingame_menu_input(PSX_MENU_INPUT_BACK, 1, 0);
+    if (close && !nav.prev_close)   psx_ingame_menu_input(PSX_MENU_INPUT_TOGGLE, 1, 0);
+    nav.prev_accept = accept; nav.prev_back = back; nav.prev_close = close;
+    if (dir < 0) {
+        nav.held = -1;
+    } else if (dir != nav.held) {
+        psx_ingame_menu_input(dir, 1, 0);
+        nav.held = dir;
+        nav.next_ms = now_ms + 350;
+    } else if ((int32_t)(now_ms - nav.next_ms) >= 0) {
+        psx_ingame_menu_input(dir, 1, 1);
+        nav.next_ms = now_ms + 110;
+    }
+}
+
+static void ingame_menu_handle_key(SDL_Keycode key, int repeat) {
+    switch (key) {
+    case SDLK_KP_8:
+    case SDLK_UP:        psx_ingame_menu_input(PSX_MENU_INPUT_UP, 1, repeat); break;
+    case SDLK_KP_2:
+    case SDLK_DOWN:      psx_ingame_menu_input(PSX_MENU_INPUT_DOWN, 1, repeat); break;
+    case SDLK_KP_4:
+    case SDLK_LEFT:      psx_ingame_menu_input(PSX_MENU_INPUT_LEFT, 1, repeat); break;
+    case SDLK_KP_6:
+    case SDLK_RIGHT:     psx_ingame_menu_input(PSX_MENU_INPUT_RIGHT, 1, repeat); break;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+    case SDLK_SPACE:     psx_ingame_menu_input(PSX_MENU_INPUT_ACCEPT, 1, repeat); break;
+    case SDLK_ESCAPE:
+    case SDLK_BACKSPACE: if (!repeat) psx_ingame_menu_input(PSX_MENU_INPUT_BACK, 1, 0); break;
+    default: break;
+    }
+}
+
+/* Freeze the guest while the menu is open; re-present the last frame under it. */
+static void ingame_menu_host_pause_loop(void) {
+    g_ingame_menu_request = 0;
+    if (!g_vk_active || !psx_ingame_menu_open()) return;
+    freeze_heartbeat_set_paused(1);
+    IngameMenuPadNav nav;
+    uint64_t last = SDL_GetPerformanceCounter();
+    const double freq = (double)SDL_GetPerformanceFrequency();
+    while (psx_ingame_menu_is_open()) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) {
+                psx_crash_trace_set_exit_origin("sdl_window_close");
+                shutdown_runtime();
+                std::exit(0);
+            } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                refresh_player_devices();
+            } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                close_controller();
+                refresh_player_devices();
+            } else if (ev.type == SDL_MOUSEMOTION) {
+                int ww = 0, wh = 0;
+                SDL_GetWindowSize(sdl_window, &ww, &wh);
+                if (ww > 0 && wh > 0)
+                    psx_ingame_menu_mouse_move((float)ev.motion.x / (float)ww,
+                                               (float)ev.motion.y / (float)wh);
+            } else if ((ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEBUTTONUP) &&
+                       ev.button.button == SDL_BUTTON_LEFT) {
+                psx_ingame_menu_mouse_button(ev.type == SDL_MOUSEBUTTONDOWN);
+            } else if (ev.type == SDL_KEYDOWN) {
+#if defined(PSX_SDL3)
+                ingame_menu_handle_key(ev.key.key, ev.key.repeat ? 1 : 0);
+#else
+                ingame_menu_handle_key(ev.key.keysym.sym, ev.key.repeat ? 1 : 0);
+#endif
+            }
+        }
+        if (!psx_ingame_menu_is_open()) break;
+        ingame_menu_poll_pad(nav, (uint32_t)SDL_GetTicks());
+        const uint64_t now = SDL_GetPerformanceCounter();
+        psx_ingame_menu_frame((float)((double)(now - last) / freq));
+        last = now;
+        vk_renderer_present_hold_last();
+#ifndef PSX_NO_DEBUG_TOOLS
+        debug_server_poll();   /* keep the debug port answering while paused */
+#endif
+        starvation_watchdog_heartbeat();
+        SDL_Delay(4);
+    }
+    freeze_heartbeat_set_paused(0);
+    /* Swallow the closing press so it doesn't reach the game. */
+    savestate_input_guard_arm();
+    if (savestate_menu_open)
+        savestate_menu_host_pause_loop();
+}
+#endif /* PSX_HAVE_INGAME_MENU */
+
 /* Epilogue for netplay admit/pace AFTER all C++ RAII in the present body
  * is destroyed — episode snap load longjmps via psx_netplay_rb_flush_resume and
  * must not cross non-trivial destructors (UB / guest crash). */
@@ -6753,6 +6937,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                     netplay_soft_exit("netplay_escape");
                     return ep;
                 }
+#if defined(PSX_HAVE_INGAME_MENU)
+                if (key == SDLK_ESCAPE && !key_repeat && g_vk_active) {
+                    g_ingame_menu_request = 1;
+                    continue;
+                }
+#endif
                 if (!key_repeat &&
                     host_keymap_match_event(HOST_KEYMAP_REWIND, (int)key,
                                             (int)scancode, (int)mod)) {
@@ -6835,8 +7025,15 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         savestate_menu_poll_toggle_buttons();
         rewind_poll_toggle_buttons();
         fast_forward_toggle_poll_buttons();
+#if defined(PSX_HAVE_INGAME_MENU)
+        ingame_menu_poll_open_button();
+#endif
         psx_rewind_note_frame();
         psx_rewind_present_tick((uint32_t)SDL_GetTicks());
+#if defined(PSX_HAVE_INGAME_MENU)
+        if (g_ingame_menu_request && !savestate_menu_open && !psx_rewind_is_open())
+            ingame_menu_host_pause_loop();
+#endif
         if (savestate_menu_open)
             savestate_menu_host_pause_loop();
         if (psx_rewind_is_open())
@@ -12457,6 +12654,46 @@ namespace {
 }  // namespace
 #endif
 
+#if defined(PSX_HAVE_INGAME_MENU)
+/* Persist what the in-game menu changes, onto the launcher's settings.toml. */
+static void ingame_menu_save_settings(void) {
+#if defined(RECOMP_LAUNCHER)
+    if (g_lnch_settings_path.empty()) return;
+    PSXRecompV4::UserSettings us = PSXRecompV4::load_user_settings(g_lnch_settings_path);
+    if (us.parse_error) return;
+    us.screen_kind = g_video_screen;
+    us.has_screen_kind = true;
+    const int fs = ingame_menu_get_fullscreen();
+    us.fullscreen = fs ? (g_fullscreen ? g_fullscreen : 1) : 0;
+    us.has_fullscreen = true;
+    (void)PSXRecompV4::save_user_settings(g_lnch_settings_path, us);
+#endif
+}
+
+/* "Open full settings": start a fresh copy of this exe in launcher mode, then
+ * exit. The new process owns the window from here. */
+static void ingame_menu_open_launcher(void) {
+#ifdef _WIN32
+    wchar_t exe[MAX_PATH * 4];
+    DWORD n = GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+    if (n == 0 || n >= (DWORD)(sizeof(exe) / sizeof(exe[0]))) return;
+    const std::wstring exe_path(exe, exe + n);
+    std::wstring cmd = L"\"" + exe_path + L"\" --launcher";
+    const std::wstring dir = std::filesystem::path(exe_path).parent_path().wstring();
+    STARTUPINFOW si = {};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, 0, NULL, dir.c_str(), &si, &pi))
+        return;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    psx_crash_trace_set_exit_origin("ingame_menu_launcher");
+    shutdown_runtime();
+    std::exit(0);
+#endif
+}
+#endif
+
 int main(int argc, char** argv) {
     /* Force line-buffered output so messages appear even if killed. */
     std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);
@@ -15379,6 +15616,9 @@ session_reboot:
         vk_renderer_set_present_mode(present_effective_swap_interval());
         g_vk_active = (vk_renderer_init_context(sdl_window) != 0);
         if (!g_vk_active) gr_set_backend(GR_BACKEND_SOFTWARE);
+#if defined(PSX_HAVE_INGAME_MENU)
+        if (g_vk_active) ingame_menu_configure(window_title);
+#endif
         if (!netplay_cpu_auth_gpu())
             g_video_scale = gr_scale();
     }

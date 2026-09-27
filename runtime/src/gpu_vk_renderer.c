@@ -48,11 +48,14 @@ void vk_renderer_restage_vram_after_savestate(void){}
 void vk_renderer_set_present_mode(int m){(void)m;}
 void vk_renderer_set_screen_kind(int k){(void)k;}
 void vk_renderer_set_display_aspect(int n,int d){(void)n;(void)d;}
+void vk_renderer_present_hold_last(void){}
+void vk_renderer_drawable_size(int*w,int*h){if(w)*w=0;if(h)*h=0;}
 int  vk_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"[]"):0;}
 const GpuRenderBackend *vk_backend_get(void) { return 0; }
 
 #else  /* PSX_HAVE_VULKAN */
 
+#include "gpu_vk_ui_overlay.h"
 #include "psx_sdl.h"
 #if defined(PSX_SDL3)
 #include <SDL3/SDL_vulkan.h>
@@ -1647,9 +1650,12 @@ static void vk_osd_blit(VkCommandBuffer cb, VkImage sc) {
 
 static void submit_present(VkCommandBuffer cb, uint32_t img_idx, uint32_t fr);
 
+static void ui_overlay_draw(VkCommandBuffer cb, uint32_t img_idx);
+
 static void finish_present(VkCommandBuffer cb, VkImage sc,
                            uint32_t img_idx, uint32_t fr) {
     vk_osd_blit(cb, sc);
+    ui_overlay_draw(cb, img_idx);
     img_barrier(cb, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 VK_ACCESS_TRANSFER_WRITE_BIT, 0,
@@ -1742,8 +1748,11 @@ static void pp_release_swapchain(void) {
     if (s_pp_rp)   { p_vkDestroyRenderPass(s_dev, s_pp_rp, NULL); s_pp_rp = VK_NULL_HANDLE; }
 }
 
+static VkRenderPass s_ui_rp;   /* host UI overlay pass (see ui_overlay_draw) */
+
 static void pp_destroy_all(void) {
     pp_release_swapchain();
+    if (s_ui_rp)   { p_vkDestroyRenderPass(s_dev, s_ui_rp, NULL); s_ui_rp = VK_NULL_HANDLE; }
     if (s_pp_pool) { p_vkDestroyDescriptorPool(s_dev, s_pp_pool, NULL); s_pp_pool = VK_NULL_HANDLE; }
     if (s_pp_pl)   { p_vkDestroyPipelineLayout(s_dev, s_pp_pl, NULL); s_pp_pl = VK_NULL_HANDLE; }
     if (s_pp_dsl)  { p_vkDestroyDescriptorSetLayout(s_dev, s_pp_dsl, NULL); s_pp_dsl = VK_NULL_HANDLE; }
@@ -1875,6 +1884,90 @@ static VkFramebuffer pp_framebuffer(uint32_t idx) {
     return s_pp_fbs[idx];
 }
 
+/* ---- host UI overlay ------------------------------------------------------
+ * A second pass over the finished swapchain image: LOAD keeps the game frame
+ * and OSD, and the image enters/leaves TRANSFER_DST_OPTIMAL like the rest of
+ * finish_present. Same attachment format/samples as s_pp_rp, so the present
+ * pass framebuffers are compatible and are reused. */
+static VkUiOverlayRecordFn s_ui_record;
+
+static int ui_rp_init(void) {
+    if (s_ui_rp) return 1;
+    VkAttachmentDescription att = {0};
+    att.format = s_sc_format; att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    att.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    VkAttachmentReference cref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sub = {0};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1; sub.pColorAttachments = &cref;
+    VkSubpassDependency dep[2] = {0};
+    /* After the present pass / OSD copies (transfer or color writes). */
+    dep[0].srcSubpass = VK_SUBPASS_EXTERNAL; dep[0].dstSubpass = 0;
+    dep[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    /* Before the present barrier, which waits on the transfer stage. */
+    dep[1].srcSubpass = 0; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dep[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    VkRenderPassCreateInfo rpi = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    rpi.attachmentCount = 1; rpi.pAttachments = &att;
+    rpi.subpassCount = 1; rpi.pSubpasses = &sub;
+    rpi.dependencyCount = 2; rpi.pDependencies = dep;
+    if (p_vkCreateRenderPass(s_dev, &rpi, NULL, &s_ui_rp) != VK_SUCCESS) {
+        s_ui_rp = VK_NULL_HANDLE;
+        return 0;
+    }
+    return 1;
+}
+
+int vk_renderer_ui_env(VkUiOverlayEnv *out) {
+    if (!out || !s_ctx_ok || s_pp_failed) return 0;
+    if (!pp_init_device_objects() || !pp_init_swapchain_objects() || !ui_rp_init())
+        return 0;
+    memset(out, 0, sizeof *out);
+    out->get_instance_proc_addr = p_vkGetInstanceProcAddr;
+    out->api_version = VK_API_VERSION_1_1;
+    out->instance = s_instance;
+    out->physical_device = s_phys;
+    out->device = s_dev;
+    out->queue_family = s_qfam;
+    out->queue = s_queue;
+    out->render_pass = s_ui_rp;
+    out->image_count = s_sc_count < 2 ? 2 : s_sc_count;
+    return 1;
+}
+
+void vk_renderer_set_ui_overlay(VkUiOverlayRecordFn fn) { s_ui_record = fn; }
+
+static void ui_overlay_draw(VkCommandBuffer cb, uint32_t img_idx) {
+    if (!s_ui_record || !s_ui_rp || !s_pp_rp) return;
+    VkFramebuffer fb = pp_framebuffer(img_idx);
+    if (!fb) return;
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = s_ui_rp; bi.framebuffer = fb;
+    bi.renderArea.extent = s_sc_extent;
+    p_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    s_ui_record(cb);
+    p_vkCmdEndRenderPass(cb);
+}
+
+void vk_renderer_drawable_size(int *w, int *h) {
+    if (w) *w = s_ctx_ok ? (int)s_sc_extent.width : 0;
+    if (h) *h = s_ctx_ok ? (int)s_sc_extent.height : 0;
+}
+
 /* Record the opaque present of src_view (already SHADER_READ_ONLY_OPTIMAL,
  * normalized src rect u0..v1) into the letterbox rect dst of the acquired
  * swapchain image, leaving it in TRANSFER_DST_OPTIMAL. Returns 0 (and records
@@ -1923,9 +2016,16 @@ static int pp_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr, VkImageView sr
     return 1;
 }
 
+/* Last successful present, replayed by vk_renderer_present_hold_last(). */
+static int s_last_kind;   /* 0 none, 1 VRAM rect, 2 native-wide surface */
+static int s_last_args[6];
+
 int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
                              int linear, int force_4_3) {
     if (!s_ctx_ok) return 0;
+    s_last_kind = 1;
+    s_last_args[0] = disp_x; s_last_args[1] = disp_y; s_last_args[2] = w;
+    s_last_args[3] = h; s_last_args[4] = linear; s_last_args[5] = force_4_3;
     flush_cpu_upload();   /* displayed VRAM may include pending CPU writes */
     flush_tex_batch(); flush_geometry(); gpu_sync();   /* drain all draws; VRAM in TRANSFER_SRC */
     VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
@@ -2101,6 +2201,9 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
     for (int k = 0; k < VK_WIDE_MAX_SURF; k++)
         if (s_wide_img[k] && s_wide_base[k] == disp_x) { i = k; break; }
     if (i < 0) return 0;
+    s_last_kind = 2;
+    s_last_args[0] = disp_x; s_last_args[1] = disp_y; s_last_args[2] = disp_h;
+    s_last_args[3] = linear;
     flush_cpu_upload();
     flush_tex_batch(); flush_geometry(); gpu_sync();
     VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
@@ -2155,6 +2258,15 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
     finish_present(cb, sc, idx, fr);
     perf_snapshot_present();
     return 1;
+}
+
+void vk_renderer_present_hold_last(void) {
+    const int *a = s_last_args;
+    if (s_last_kind == 2 && vk_renderer_present_wide(a[0], a[1], a[2], a[3]))
+        return;
+    if (s_last_kind == 1 && vk_renderer_present_vram(a[0], a[1], a[2], a[3], a[4], a[5]))
+        return;
+    vk_renderer_present_blank();
 }
 
 void vk_renderer_sync_cpu(void) {

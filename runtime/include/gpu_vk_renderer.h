@@ -57,6 +57,13 @@ void vk_renderer_set_present_mode(int mode);
 void vk_renderer_set_screen_kind(int kind);
 void vk_renderer_set_display_aspect(int num, int den);
 
+/* Re-present the last displayed frame (VRAM or native-wide surface) without
+ * running the guest -- used behind pause overlays. Falls back to a black
+ * frame when nothing has been presented yet. */
+void vk_renderer_present_hold_last(void);
+/* Current swapchain size in pixels (0x0 before the first swapchain). */
+void vk_renderer_drawable_size(int *w, int *h);
+
 #ifdef __cplusplus
 }
 #endif

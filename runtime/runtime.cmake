@@ -2231,6 +2231,21 @@ function(psxrecomp_add_runtime_target target)
             target_include_directories(${target} PRIVATE "${_vk_inc}")
         endif()
         target_compile_definitions(${target} PRIVATE PSX_HAVE_VULKAN=1)
+        # In-game menu: the recomp-ui runtime menu drawn by Dear ImGui's Vulkan
+        # backend (same ImGui release as recomp-ui's vendored copy) over the
+        # present pass. Needs the launcher's ImGui build, so launcher builds only.
+        if(PSX_RECOMP_UI AND NOT PSXRT_ORACLE)
+            set(_psx_imgui_vk "${PSXRECOMP_ROOT}/runtime/third_party/imgui_vulkan")
+            target_sources(${target} PRIVATE
+                "${PSXRECOMP_ROOT}/runtime/src/psx_ingame_menu.cpp"
+                "${_psx_imgui_vk}/imgui_impl_vulkan.cpp")
+            set_source_files_properties(
+                "${PSXRECOMP_ROOT}/runtime/src/psx_ingame_menu.cpp"
+                "${_psx_imgui_vk}/imgui_impl_vulkan.cpp"
+                PROPERTIES COMPILE_DEFINITIONS "IMGUI_IMPL_VULKAN_NO_PROTOTYPES")
+            target_include_directories(${target} PRIVATE "${_psx_imgui_vk}")
+            target_compile_definitions(${target} PRIVATE PSX_HAVE_INGAME_MENU=1)
+        endif()
         # Compile every shader under runtime/shaders/ to SPIR-V (glslc) and embed
         # them into one generated header (vk_shaders_spv.h) of uint32_t arrays, so
         # gpu_vk_renderer.c creates shader modules with no runtime file deps.

@@ -7756,6 +7756,18 @@ static void handle_pad_status(int id, const char *json)
              s_axis_override ? "true" : "false");
 }
 
+#if defined(PSX_HAVE_INGAME_MENU)
+#include "psx_ingame_menu.h"
+/* ingame_menu: pause-menu state and its recent input/selection ring. */
+static void handle_ingame_menu(int id, const char *json)
+{
+    (void)json;
+    static char body[8192];
+    psx_ingame_menu_debug_json(body, (int)sizeof body);
+    send_fmt("{\"id\":%d,\"ok\":true,%s}\n", id, body);
+}
+#endif
+
 static void handle_clear_input(int id, const char *json)
 {
     (void)json;
@@ -14038,6 +14050,9 @@ static const CmdEntry s_commands[] = {
     { "set_input",         handle_set_input },
     { "press",             handle_press },
     { "pad_status",        handle_pad_status },
+#if defined(PSX_HAVE_INGAME_MENU)
+    { "ingame_menu",       handle_ingame_menu },
+#endif
     { "pad_rumble",        handle_pad_rumble },
     { "pad_analog",        handle_pad_analog },
     { "clear_input",       handle_clear_input },
