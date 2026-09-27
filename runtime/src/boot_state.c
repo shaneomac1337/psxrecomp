@@ -195,7 +195,11 @@ static int apply_section(uint32_t tag, const uint8_t* p, uint32_t len,
         if (len != sizeof(CpuRegs)) return 0;
         const CpuRegs* c = (const CpuRegs*)p;
         memcpy(cpu->gpr,      c->gpr,      sizeof cpu->gpr);
-        cpu->pc = entry_pc;   /* always enter at the game entry, never a mid-PC */
+        /* Resume at the saved PC: user save states (savestate.c, the only
+         * loader) store the block-leader resume PC, and a boot capture stores
+         * the entry itself. Forcing entry_pc re-ran main() over mid-game RAM
+         * (black screen, wild jump to PC 0). */
+        cpu->pc = c->pc ? c->pc : entry_pc;
         cpu->hi = c->hi; cpu->lo = c->lo;
         memcpy(cpu->cop0,     c->cop0,     sizeof cpu->cop0);
         memcpy(cpu->gte_data, c->gte_data, sizeof cpu->gte_data);

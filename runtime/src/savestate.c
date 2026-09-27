@@ -65,6 +65,9 @@ int savestate_request_load(int slot) {
 
 void savestate_poll(CPUState* cpu, uint32_t resume_pc) {
     if (s_save_pending < 0 && s_load_pending < 0) return;   /* hot path: nothing staged */
+    /* No known resume PC at this boundary: keep the request staged for the next
+     * one (a save here would record pc 0 and resume at the entry point). */
+    if (resume_pc == 0) return;
 
     if (s_save_pending >= 0) {
         int slot = s_save_pending;

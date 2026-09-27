@@ -728,7 +728,12 @@ void psx_check_interrupts(CPUState* cpu) {
         !s_defer_switch_pending && g_idle_skip_enabled == 0) {
         if ((++s_fast_maintenance & 0x3FFFu) == 0) {
             extern void savestate_poll(CPUState* cpu, uint32_t resume_pc);
-            savestate_poll(cpu, s_compiled_interrupt_resume_pc);
+            /* Same resume-PC rule as the slow path below: code running from
+             * dirty RAM (overlays) resumes at g_dirty_safe_resume_pc; the raw
+             * compiled PC is stale/0 there (saved states resumed in the wrong
+             * code -> wild jump to PC 0). */
+            savestate_poll(cpu, g_dirty_safe_resume_pc ? g_dirty_safe_resume_pc
+                                                       : s_compiled_interrupt_resume_pc);
             debug_server_poll();
         }
         return;
