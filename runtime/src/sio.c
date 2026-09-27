@@ -63,6 +63,13 @@ static uint8_t pad_rumble_map[PSX_MAX_PLAYERS][6] = {
 };
 static PSX_BSS uint8_t pad_rumble_small[PSX_MAX_PLAYERS];
 static PSX_BSS uint32_t pad_rumble_map_cmds[PSX_MAX_PLAYERS];  /* 0x4D seen */
+/* Old (SCPH-1150 compatible) rumble method, psx-spx "Controllers - Vibration/
+ * Rumble Control": before any config command, 0x42's 4th/5th command bytes
+ * (xx, yy) switch the small motor on when xx is 40h..7Fh and yy bit0 is set.
+ * The first config-mode entry disables the old method for good. */
+static PSX_BSS uint8_t pad_rumble_old_xx[PSX_MAX_PLAYERS];
+static PSX_BSS uint8_t pad_rumble_old_yy[PSX_MAX_PLAYERS];
+static PSX_BSS uint8_t pad_rumble_cfg_used[PSX_MAX_PLAYERS];
 static PSX_BSS uint8_t pad_rumble_large[PSX_MAX_PLAYERS];
 
 /* Analog-mode lock, per logical pad. A real DualShock's config command 0x44
@@ -790,6 +797,9 @@ void sio_init(void) {
     memset(pad_rumble_map, 0xFF, sizeof(pad_rumble_map));
     memset(pad_rumble_small, 0, sizeof(pad_rumble_small));
     memset(pad_rumble_large, 0, sizeof(pad_rumble_large));
+    memset(pad_rumble_old_xx, 0, sizeof(pad_rumble_old_xx));
+    memset(pad_rumble_old_yy, 0, sizeof(pad_rumble_old_yy));
+    memset(pad_rumble_cfg_used, 0, sizeof(pad_rumble_cfg_used));
     for (int i = 0; i < PSX_MAX_PLAYERS; i++) {
         pad_buttons[i] = 0xFFFF;
         pad_analog[i] = 0;
@@ -974,6 +984,8 @@ void sio_netplay_canonicalize_session_pads(int slot_count)
             memset(pad_rumble_map[i], 0xFF, sizeof(pad_rumble_map[i]));
             pad_rumble_small[i] = 0;
             pad_rumble_large[i] = 0;
+            pad_rumble_old_xx[i] = pad_rumble_old_yy[i] = 0;
+            pad_rumble_cfg_used[i] = 0;
         } else {
             sio_set_pad_connected(i, 0);
             sio_set_pad_analog(i, 0, 0x80, 0x80, 0x80, 0x80);
@@ -992,6 +1004,7 @@ void sio_set_pad_connected(int slot, int connected) {
         pad_connected &= (uint8_t)~(1u << slot);
         pad_rumble_small[slot] = 0;
         pad_rumble_large[slot] = 0;
+        pad_rumble_old_xx[slot] = pad_rumble_old_yy[slot] = 0;
     }
 }
 
@@ -1005,6 +1018,7 @@ void sio_set_pad_config_capable(int slot, int capable) {
         pad_in_config[slot] = 0;
         pad_rumble_small[slot] = 0;
         pad_rumble_large[slot] = 0;
+        pad_rumble_old_xx[slot] = pad_rumble_old_yy[slot] = 0;
     }
 }
 
@@ -1017,8 +1031,23 @@ void sio_get_pad_rumble_map(int slot, uint8_t map[6], uint32_t *map_cmds) {
 void sio_get_pad_rumble(int slot, uint8_t *small, uint8_t *large) {
     uint8_t s = 0, l = 0;
     if (slot >= 0 && slot < PSX_MAX_PLAYERS && (pad_connected & (1u << slot))) {
-        s = pad_rumble_small[slot];
-        l = pad_rumble_large[slot];
+        /* New method once config mode was used, or whenever a motor map is
+         * present (covers save states, which carry the map but not the
+         * config-used flag). */
+        int new_method = pad_rumble_cfg_used[slot];
+        for (int i = 0; i < 6 && !new_method; i++)
+            if (pad_rumble_map[slot][i] != 0xFF) new_method = 1;
+        if (new_method) {
+            /* New method (psx-spx 4Dh): the small motor is bit0 of its mapped
+             * byte only (0x02, 0x40, 0x80 ... are OFF); large is 0..255. */
+            s = (pad_rumble_small[slot] & 0x01u) ? 1u : 0u;
+            l = pad_rumble_large[slot];
+        } else {
+            /* Old method: small motor on iff xx is 40h..7Fh and yy bit0. */
+            s = ((pad_rumble_old_xx[slot] & 0xC0u) == 0x40u &&
+                 (pad_rumble_old_yy[slot] & 0x01u)) ? 1u : 0u;
+            l = 0;
+        }
     }
     if (small) *small = s;
     if (large) *large = l;
@@ -1418,6 +1447,10 @@ static void pad_process_byte(uint8_t tx_byte) {
                     pad_response_idx >= 2 && pad_response_idx < 8) {
                     const unsigned map_index = (unsigned)pad_response_idx - 2u;
                     const uint8_t motor = pad_rumble_map[rs][map_index];
+                    if (!pad_rumble_cfg_used[rs]) {      /* old method */
+                        if (map_index == 0) pad_rumble_old_xx[rs] = tx_byte;
+                        else if (map_index == 1) pad_rumble_old_yy[rs] = tx_byte;
+                    }
                     if (motor == 0x00)
                         pad_rumble_small[rs] = tx_byte;
                     else if (motor == 0x01)
@@ -1440,6 +1473,11 @@ static void pad_process_byte(uint8_t tx_byte) {
         if (!g_pad_legacy_cfg && pad_current_cmd == 0x43 && pad_response_idx == 2 &&
             pad_active_logical >= 0 && pad_active_logical < PSX_MAX_PLAYERS)
             pad_in_config[pad_active_logical] = (tx_byte == 0x01) ? 1 : 0;
+            if (tx_byte == 0x01) {
+                pad_rumble_cfg_used[pad_active_logical] = 1;
+                pad_rumble_old_xx[pad_active_logical] = 0;
+                pad_rumble_old_yy[pad_active_logical] = 0;
+            }
         /* 0x44 set-mode (game owns the analog/digital mode): the mode byte rides
          * in the same slot as 0x43's enter/exit flag (data position 3). 0x01 =>
          * analog (0x73), 0x00 => digital (0x41). Honouring it makes the pad
@@ -2909,6 +2947,9 @@ static int sio_snap_parse(PstR *r) {
         memset(pad_rumble_map, 0xFF, sizeof(pad_rumble_map));
         memset(pad_rumble_small, 0, sizeof(pad_rumble_small));
         memset(pad_rumble_large, 0, sizeof(pad_rumble_large));
+    memset(pad_rumble_old_xx, 0, sizeof(pad_rumble_old_xx));
+    memset(pad_rumble_old_yy, 0, sizeof(pad_rumble_old_yy));
+    memset(pad_rumble_cfg_used, 0, sizeof(pad_rumble_cfg_used));
         for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
             pad_rumble_map[s][0] = 0x00;
             pad_rumble_map[s][1] = 0x01;
