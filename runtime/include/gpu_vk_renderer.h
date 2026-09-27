@@ -52,6 +52,9 @@ void vk_renderer_restage_vram_after_savestate(void);
  * -1=MAILBOX. Tear-free prefers MAILBOX because the frontend already paces
  * frames; unsupported modes fall back to FIFO (always available). */
 void vk_renderer_set_present_mode(int mode);
+/* Screen model for the present pass (ScreenKind: 0 raw, 1 crt, 2 composite,
+ * 3 trinitron). PSX_SCREEN env overrides, like the software scanout LUT. */
+void vk_renderer_set_screen_kind(int kind);
 void vk_renderer_set_display_aspect(int num, int den);
 
 #ifdef __cplusplus

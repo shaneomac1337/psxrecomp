@@ -28,6 +28,7 @@
 #include "event_ring.h"
 #include "psx_video_timing.h"
 #include "color_lut.h"
+#include "gpu_vk_renderer.h"   /* vk_renderer_set_screen_kind */
 #include "mod_runtime.h"
 #include "mod_plugins.h"
 #include "ws_scene_hold.h"
@@ -3343,6 +3344,7 @@ static int       s_screen_kind_cfg = SCREEN_RAW;  /* config/launcher-set; env ov
 
 void gpu_set_screen_kind(int kind) {
     if (kind < SCREEN_RAW || kind > SCREEN_TRINITRON) kind = SCREEN_RAW;
+    vk_renderer_set_screen_kind(kind);   /* Vulkan present pass CRT models */
     if (kind == s_screen_kind_cfg) return;
     s_screen_kind_cfg = kind;
     s_screen_lut_init = 0;  /* rebuild on next scanout */

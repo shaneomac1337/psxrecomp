@@ -20,6 +20,8 @@
 #include "gpu.h"
 #include "gpu_render.h"
 #include "gpu_vk_renderer.h"
+#include "color_lut.h"   /* ScreenKind + screen_kind_from_name (present pass) */
+#include <stdlib.h>
 #include "gpu_sw_renderer.h"
 #include "host_osd.h"
 #include "psx_savestate_menu.h"
@@ -44,6 +46,7 @@ void vk_renderer_present_blank(void){}
 void vk_renderer_sync_cpu(void){}
 void vk_renderer_restage_vram_after_savestate(void){}
 void vk_renderer_set_present_mode(int m){(void)m;}
+void vk_renderer_set_screen_kind(int k){(void)k;}
 void vk_renderer_set_display_aspect(int n,int d){(void)n;(void)d;}
 int  vk_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"[]"):0;}
 const GpuRenderBackend *vk_backend_get(void) { return 0; }
@@ -1713,7 +1716,21 @@ static VkShaderModule        s_pp_vs, s_pp_fs;
 static VkSampler             s_pp_near, s_pp_lin;
 static int                   s_pp_failed;
 
-typedef struct { float src_rect[4]; } PresentPush;
+typedef struct {
+    float   src_rect[4];
+    float   out_size[2];
+    float   native[2];
+    int32_t kind;
+} PresentPush;
+
+static int s_pp_kind;   /* ScreenKind for the present pass (0 = raw) */
+
+void vk_renderer_set_screen_kind(int kind) {
+    const char *e = getenv("PSX_SCREEN");   /* debug override, like the SW LUT */
+    ScreenKind envk;
+    if (e && screen_kind_from_name(e, &envk)) kind = (int)envk;
+    s_pp_kind = (kind >= SCREEN_RAW && kind <= SCREEN_TRINITRON) ? kind : SCREEN_RAW;
+}
 
 /* Swapchain-lifetime objects (the render pass depends on s_sc_format). */
 static void pp_release_swapchain(void) {
@@ -1864,7 +1881,8 @@ static VkFramebuffer pp_framebuffer(uint32_t idx) {
  * nothing) when the pass is unavailable: the caller then uses the blit. */
 static int pp_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr, VkImageView src_view,
                    int linear, const VkOffset3D dst[2],
-                   float u0, float v0, float u1, float v1) {
+                   float u0, float v0, float u1, float v1,
+                   float native_w, float native_h) {
     if (s_pp_failed) return 0;
     if (!pp_init_device_objects() || !pp_init_swapchain_objects()) {
         s_pp_failed = 1;
@@ -1874,7 +1892,8 @@ static int pp_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr, VkImageView sr
     VkFramebuffer fb = pp_framebuffer(idx);
     if (!fb) return 0;
 
-    VkDescriptorImageInfo ii = { linear ? s_pp_lin : s_pp_near, src_view,
+    /* The CRT models filter across neighbouring texels: always linear. */
+    VkDescriptorImageInfo ii = { (linear || s_pp_kind) ? s_pp_lin : s_pp_near, src_view,
                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w.dstSet = s_pp_ds[fr]; w.dstBinding = 0; w.descriptorCount = 1;
@@ -1896,7 +1915,8 @@ static int pp_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr, VkImageView sr
     p_vkCmdSetScissor(cb, 0, 1, &sci);
     p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_pipe);
     p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_pl, 0, 1, &s_pp_ds[fr], 0, NULL);
-    PresentPush pc = { { u0, v0, u1, v1 } };
+    PresentPush pc = { { u0, v0, u1, v1 }, { view.width, view.height },
+                       { native_w, native_h }, s_pp_kind };
     p_vkCmdPushConstants(cb, s_pp_pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
     p_vkCmdDraw(cb, 3, 1, 0, 0);
     p_vkCmdEndRenderPass(cb);
@@ -1920,7 +1940,8 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
     vram_to(cb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     int drawn = pp_draw(cb, idx, fr, s_vram_view, linear, dst,
                         disp_x / (float)VRAM_W, disp_y / (float)VRAM_H,
-                        (disp_x + w) / (float)VRAM_W, (disp_y + h) / (float)VRAM_H);
+                        (disp_x + w) / (float)VRAM_W, (disp_y + h) / (float)VRAM_H,
+                        (float)w, (float)h);
     vram_to(cb, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   /* re-park */
     if (drawn) {
         finish_present(cb, sc, idx, fr);
@@ -2096,7 +2117,8 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
     img_to(cb, s_wide_img[i], &s_wide_layout[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     int drawn = pp_draw(cb, idx, fr, s_wide_view[i], linear, dst,
                         0.0f, disp_y / (float)VRAM_H,
-                        1.0f, (disp_y + disp_h) / (float)VRAM_H);
+                        1.0f, (disp_y + disp_h) / (float)VRAM_H,
+                        (float)s_wide_w, (float)disp_h);
     if (drawn) {
         img_to(cb, s_wide_img[i], &s_wide_layout[i], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         finish_present(cb, sc, idx, fr);
