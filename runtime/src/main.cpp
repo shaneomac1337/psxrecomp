@@ -382,6 +382,11 @@ struct PlayerInput {
     uint8_t rumble_large = 0;
     bool    rumble_known = false;
     bool    rumble_warned = false;
+    /* Device "auto": the first connected game controller AND the keyboard
+     * drive this seat together, like a PC game's default input. With no pad
+     * connected the seat presents as a digital pad (keyboard has no sticks or
+     * motors); plugging one in makes it a DualShock again. */
+    bool    auto_device = false;
 };
 static PlayerInput g_players[PSX_MAX_PLAYERS];
 /* Offline SIO sample loop bound (from game.toml players; clamped). */
@@ -4458,6 +4463,8 @@ extern "C" { int g_debug_keyboard_keeps_mode = 0; }
 static int effective_player_mode(const PlayerInput& p) {
     if (p.kind == 1 && !g_debug_keyboard_keeps_mode)
         return (int)PSXRecompV4::PAD_MODE_DIGITAL;
+    if (p.kind == 2 && p.auto_device && !p.handle)   /* keyboard-only for now */
+        return (int)PSXRecompV4::PAD_MODE_DIGITAL;
     return p.mode;
 }
 
@@ -4504,6 +4511,7 @@ static void refresh_player_devices(void) {
 static void set_player_device(PlayerInput& p, const std::string& dev, int mode) {
     p.mode = mode;
     p.guid[0] = '\0';
+    p.auto_device = false;
     std::string d = lower_copy(trim_copy(dev));
     if (d.empty() || d == "none") { p.kind = 0; }
     else if (d == "keyboard")     { p.kind = 1; }
@@ -4512,6 +4520,7 @@ static void set_player_device(PlayerInput& p, const std::string& dev, int mode) 
          * back to the first connected pad). Lets a user default to "my
          * controller" without pinning a specific GUID. */
         p.kind = 2;  /* p.guid already cleared above */
+        p.auto_device = (d == "auto");
     }
     else {
         p.kind = 2;
@@ -4622,6 +4631,14 @@ static void axes_to_pad_pair(int16_t vx, int16_t vy, uint8_t* obx, uint8_t* oby,
  * 1..5 — selects which keybinds.ini section drives a keyboard port. */
 static uint16_t pad_buttons_for(const PlayerInput& p, int player, bool suppress_stick_axes) {
     if (p.kind == 1) return pad_from_keyboard(player);
+    if (p.kind == 2 && p.auto_device) {
+        /* Active-low words: AND merges keyboard and pad presses. */
+        uint16_t b = pad_from_keyboard(player);
+        if (p.handle)
+            b &= controller_pad_buttons(controller_map_for(p), p.handle,
+                                        suppress_stick_axes, p.deadzone);
+        return b;
+    }
     if (p.kind == 2)
         return controller_pad_buttons(controller_map_for(p), p.handle,
                                       suppress_stick_axes, p.deadzone);
@@ -4648,7 +4665,7 @@ static uint16_t pad_buttons_for(const PlayerInput& p, int player, bool suppress_
  * source. */
 static void pad_sticks_for(const PlayerInput& p, int player, uint8_t out[4]) {
     out[0] = out[1] = out[2] = out[3] = 0x80;
-    if (p.kind == 1) {
+    if (p.kind == 1 || (p.kind == 2 && p.auto_device && !p.handle)) {
         /* Keyboard analog: the configurable left/right stick-direction binds
          * (default = arrow keys on the LEFT stick; RIGHT stick unbound), so the
          * old keyboard analog behaviour is preserved unless the user rebinds. */
