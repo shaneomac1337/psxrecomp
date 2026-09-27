@@ -4558,6 +4558,17 @@ static void handle_read_ram(int id, const char *json)
  * the socket send buffer filled, the main-thread-pumped server blocked, and
  * the freeze watchdog killed the process.  One request, one response. */
 
+/* {"cmd":"overclock","pct":N} -> set the emulated CPU overclock (100 = off);
+ * pct omitted just reports it. See psx_advance_cycles. */
+static void handle_overclock(int id, const char *json)
+{
+    extern uint32_t g_psx_cpu_overclock_pct;
+    extern void psx_set_cpu_overclock(int pct);
+    int pct = json_get_int(json, "pct", -1);
+    if (pct >= 0) psx_set_cpu_overclock(pct);
+    send_fmt("{\"id\":%d,\"ok\":true,\"pct\":%u}\n", id, g_psx_cpu_overclock_pct);
+}
+
 static void handle_write_ram(int id, const char *json)
 {
     char addr_str[32], val_str[32];
@@ -11883,6 +11894,7 @@ static const CmdEntry s_commands[] = {
     { "read_ram",          handle_read_ram },
     { "dump_ram",          handle_read_ram },   /* alias: one request, one response */
     { "write_ram",         handle_write_ram },
+    { "overclock",         handle_overclock },
     { "gpu_state",         handle_gpu_state },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },

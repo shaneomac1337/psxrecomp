@@ -187,9 +187,34 @@ static void psx_advance_cycles_exact(uint32_t cycles) {
     s_next_service_cycle   = 0;
 }
 
+uint32_t g_psx_cpu_overclock_pct = 0;   /* 0 = not yet read from env */
+void psx_set_cpu_overclock(int pct) {
+    g_psx_cpu_overclock_pct = (uint32_t)(pct < 100 ? 100 : pct > 1000 ? 1000 : pct);
+}
+
 void psx_advance_cycles(uint32_t cycles) {
     { extern int g_ls_replay_active; if (g_ls_replay_active) return; }  /* lockstep replay: no global cycle/device mutation */
     if (cycles == 0) return;
+    /* [EXP] Enhancement-tier CPU overclock: charges cycles/(pct/100) guest
+     * cycles, so more work fits between vblank/timer events (which stay on the
+     * true clock). Initial value from PSX_CPU_OVERCLOCK=<percent>; switchable
+     * live via the "overclock" debug command (boot is timing-sensitive — enable
+     * it once in-game). Fractional remainder carried in s_oc_acc. 100 = faithful
+     * timing, byte-identical path. */
+    {
+        static uint64_t s_oc_acc = 0;
+        if (g_psx_cpu_overclock_pct == 0) {
+            const char *e = getenv("PSX_CPU_OVERCLOCK");
+            psx_set_cpu_overclock((e && *e) ? atoi(e) : 100);
+        }
+        uint32_t pct = g_psx_cpu_overclock_pct;
+        if (pct != 100) {
+            s_oc_acc += (uint64_t)cycles * 100u;
+            cycles = (uint32_t)(s_oc_acc / pct);
+            s_oc_acc -= (uint64_t)cycles * pct;
+            if (cycles == 0) return;
+        }
+    }
     uint32_t charged_cycles = cycles;
 #ifdef PSX_COSIM
     psx_advance_cycles_exact(cycles);
