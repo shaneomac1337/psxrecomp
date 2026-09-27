@@ -267,6 +267,12 @@ static VkImage         s_ds_img;
 static VkDeviceMemory  s_ds_mem;
 static VkImageView     s_ds_view;
 static VkFormat        s_ds_format;
+/* Both candidate formats (D24S8 / D32S8) are COMBINED depth+stencil: views,
+ * barriers and image clears must name BOTH aspects (no separateDepthStencil-
+ * Layouts). Stencil-only left the depth half - which shares AMD HTILE
+ * metadata with stencil - in UNDEFINED: mask-checked draws then skipped random
+ * pixels (black confetti on RDNA3; NVIDIA tolerated it). */
+#define DS_ASPECT (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
 
 /* Scratch hr image for VRAM->VRAM copies (resolves overlap). */
 static VkImage         s_scratch_img;
@@ -1094,7 +1100,7 @@ static int create_render_targets(void) {
                     VK_IMAGE_ASPECT_COLOR_BIT, &s_raw_img, &s_raw_mem, &s_raw_view)) return 0;
     s_ds_format = choose_ds_format();
     if (!make_image(s_ds_format, VRAM_W * S, VRAM_H * S,
-                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_STENCIL_BIT,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, DS_ASPECT,
                     &s_ds_img, &s_ds_mem, &s_ds_view)) return 0;
     if (!make_image(VK_FORMAT_R8G8B8A8_UNORM, VRAM_W * S, VRAM_H * S,
                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -1116,12 +1122,12 @@ static int create_render_targets(void) {
         db.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         db.srcQueueFamilyIndex = db.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         db.image = s_ds_img; db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        db.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+        db.subresourceRange.aspectMask = DS_ASPECT;
         db.subresourceRange.levelCount = 1; db.subresourceRange.layerCount = 1;
         p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                0, 0, NULL, 0, NULL, 1, &db);
         VkClearDepthStencilValue dsv = { 0.0f, 0 };
-        VkImageSubresourceRange srng = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
+        VkImageSubresourceRange srng = { DS_ASPECT, 0, 1, 0, 1 };
         p_vkCmdClearDepthStencilImage(cb, s_ds_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dsv, 1, &srng);
         db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         db.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -1588,12 +1594,12 @@ static int crt_pipeline_ensure(void) {
  * image must be untouched this frame (pass takes it UNDEFINED -> PRESENT).
  * Returns 0 if the pass is unavailable (caller falls back to the blit). */
 static int crt_present_draw(VkCommandBuffer cb, uint32_t img_idx, uint32_t fr,
-                            VkImageView src_view, const VkOffset3D dst[2],
+                            VkImageView src_view, VkSampler samp, const VkOffset3D dst[2],
                             float u0, float v0, float u1, float v1,
                             float native_w, float native_h) {
     if (img_idx >= 8 || !s_sc_fbs[img_idx] || !crt_pipeline_ensure()) return 0;
 
-    VkDescriptorImageInfo ii = { s_samp_lin, src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo ii = { samp, src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w.dstSet = s_ds_crt[fr]; w.dstBinding = 0; w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &ii;
@@ -1750,10 +1756,11 @@ static void vk_verify_probe(int disp_x, int disp_y, int w, int h) {
  * content). Comparing them offline localizes which surface holds the black. */
 static void vk_dump_probe(void) {
     static int en = -1, calls = 0;
-    if (en < 0) { const char *e = getenv("PSX_VK_DUMP"); en = (e && e[0]=='1') ? 1 : 0; }
+    /* PSX_VK_DUMP=1 -> presents 60/120/180; PSX_VK_DUMP=N (>1) -> present N only. */
+    if (en < 0) { const char *e = getenv("PSX_VK_DUMP"); en = e ? atoi(e) : 0; }
     if (!en || !s_ready || !s_vram) return;
     int c = calls++;
-    if (c != 60 && c != 120 && c != 180) return;
+    if (en == 1 ? (c != 60 && c != 120 && c != 180) : c != en) return;
     char name[64];
     FILE *f;
     snprintf(name, sizeof name, "vkdump_%d_cpu.bin", c);
@@ -1779,6 +1786,29 @@ static void vk_dump_probe(void) {
         if ((f = fopen(name, "wb"))) { fwrite(map, 2, VRAM_W * VRAM_H, f); fclose(f); }
     }
     free_staging(buf, mem);
+    /* hr image itself via a TRANSFER read (the same access path as the present
+     * blit): RGBA8 (VRAM_W*S) x (VRAM_H*S). The raw dumps only see what the pack
+     * shader samples (one texel per PSX pixel). */
+    {
+        int S = s_scale;
+        VkDeviceSize bytes = (VkDeviceSize)VRAM_W * S * VRAM_H * S * 4;
+        if (make_staging(bytes, &buf, &mem, &map)) {
+            VkCommandBuffer cb = begin_oneshot();
+            VkImageLayout prev = s_vram_layout;
+            vram_to(cb, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy rc = {0};
+            rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            rc.imageSubresource.layerCount = 1;
+            rc.imageExtent.width = VRAM_W * S; rc.imageExtent.height = VRAM_H * S; rc.imageExtent.depth = 1;
+            p_vkCmdCopyImageToBuffer(cb, s_vram_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &rc);
+            vram_to(cb, prev);
+            end_oneshot(cb);
+            gpu_sync();
+            snprintf(name, sizeof name, "vkdump_%d_hr_s%d.bin", c, S);
+            if ((f = fopen(name, "wb"))) { fwrite(map, 1, (size_t)bytes, f); fclose(f); }
+            free_staging(buf, mem);
+        }
+    }
     fprintf(stdout, "[DEBUG-vk01] dumped VRAM states at present %d\n", c);
     fflush(stdout);
 }
@@ -1798,11 +1828,14 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
     letterbox((int)s_sc_extent.width, (int)s_sc_extent.height,
               force_4_3 ? 4 : 4, force_4_3 ? 3 : 3, dst);
 
-    /* Screen simulation: route the present through the CRT shader pass
-     * instead of the blit. Falls through to the blit if unavailable. */
-    if (s_crt_kind != SCREEN_RAW && s_ready) {
+    /* Present through the shader pass (raw = plain sample, else CRT
+     * simulation): it writes alpha = 1. The transfer blit below copies VRAM's
+     * mask-bit alpha into the swapchain — AMD composites that as transparency
+     * (desktop showing through as black/white blocks). Blit = fallback only. */
+    if (s_ready) {
         vram_to(cb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        int ok = crt_present_draw(cb, idx, fr, s_vram_view, dst,
+        VkSampler samp = (s_crt_kind != SCREEN_RAW || linear) ? s_samp_lin : s_samp;
+        int ok = crt_present_draw(cb, idx, fr, s_vram_view, samp, dst,
                                   disp_x / (float)VRAM_W, disp_y / (float)VRAM_H,
                                   (disp_x + w) / (float)VRAM_W, (disp_y + h) / (float)VRAM_H,
                                   (float)w, (float)h);
@@ -1977,11 +2010,12 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
     letterbox((int)s_sc_extent.width, (int)s_sc_extent.height,
               4 * s_wide_w, 3 * native_w, dst);
 
-    /* Screen simulation: CRT shader pass instead of the blit (see
+    /* Shader pass (raw or CRT) instead of the blit: forces alpha = 1 (see
      * vk_renderer_present_vram). */
-    if (s_crt_kind != SCREEN_RAW) {
+    {
         img_to(cb, s_wide_img[i], &s_wide_layout[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        int ok = crt_present_draw(cb, idx, fr, s_wide_view[i], dst,
+        VkSampler samp = (s_crt_kind != SCREEN_RAW || linear) ? s_samp_lin : s_samp;
+        int ok = crt_present_draw(cb, idx, fr, s_wide_view[i], samp, dst,
                                   0.0f, disp_y / (float)VRAM_H,
                                   1.0f, (disp_y + disp_h) / (float)VRAM_H,
                                   (float)s_wide_w, (float)disp_h);
@@ -2116,7 +2150,7 @@ static void begin_geo_pass(VkCommandBuffer cb) {
     db.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     db.srcQueueFamilyIndex = db.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     db.image = s_ds_img;
-    db.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+    db.subresourceRange.aspectMask = DS_ASPECT;
     db.subresourceRange.levelCount = 1;
     db.subresourceRange.layerCount = 1;
     db.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -2637,7 +2671,7 @@ static int wide_surf_for(int base_x) {
             return -1;
         if (!make_image(s_ds_format, w, h,
                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                        VK_IMAGE_ASPECT_STENCIL_BIT, &s_wide_ds_img[i], &s_wide_ds_mem[i], &s_wide_ds_view[i]))
+                        DS_ASPECT, &s_wide_ds_img[i], &s_wide_ds_mem[i], &s_wide_ds_view[i]))
             return -1;
         VkImageView views[2] = { s_wide_view[i], s_wide_ds_view[i] };
         VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -2657,12 +2691,12 @@ static int wide_surf_for(int base_x) {
         db.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         db.srcQueueFamilyIndex = db.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         db.image = s_wide_ds_img[i]; db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        db.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+        db.subresourceRange.aspectMask = DS_ASPECT;
         db.subresourceRange.levelCount = 1; db.subresourceRange.layerCount = 1;
         p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                0, 0, NULL, 0, NULL, 1, &db);
         VkClearDepthStencilValue dsv = { 0.0f, 0 };
-        VkImageSubresourceRange srng = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
+        VkImageSubresourceRange srng = { DS_ASPECT, 0, 1, 0, 1 };
         p_vkCmdClearDepthStencilImage(cb, s_wide_ds_img[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dsv, 1, &srng);
         db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         db.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -2693,7 +2727,7 @@ static void wide_pass_begin(VkCommandBuffer cb) {
     db.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     db.srcQueueFamilyIndex = db.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     db.image = s_wide_ds_img[i];
-    db.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+    db.subresourceRange.aspectMask = DS_ASPECT;
     db.subresourceRange.levelCount = 1; db.subresourceRange.layerCount = 1;
     db.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     db.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |

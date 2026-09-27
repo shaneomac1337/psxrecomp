@@ -3,6 +3,7 @@
  * present blit when screen kind != raw. Sampled in linear filtering.
  *
  * Kinds (must match ScreenKind in color_lut.h):
+ *   0 raw        plain sample (the default present; see below)
  *   1 crt        shadow-mask triads + gaussian scanline beam
  *   2 composite  strong horizontal blur + chroma bleed + soft scanlines
  *   3 trinitron  aperture-grille stripes + gaussian scanline beam
@@ -43,6 +44,13 @@ vec3 line_sample(float x, float y) {
 }
 
 void main() {
+    /* Raw: plain sample, alpha forced opaque. VRAM alpha is the PSX mask/STP
+     * bit (0 on most pixels); a transfer blit copied it into the swapchain and
+     * AMD's compositor let the desktop show through (black/white "confetti"). */
+    if (pc.u_kind == 0) {
+        o_col = vec4(texture(u_src, mix(pc.u_src_rect.xy, pc.u_src_rect.zw, v_uv)).rgb, 1.0);
+        return;
+    }
     float lines = max(pc.u_native.y, 1.0);
     float ly = v_uv.y * lines;                     /* position in scanline space */
     float lc = floor(ly - 0.5) + 0.5;              /* nearest line centre */
