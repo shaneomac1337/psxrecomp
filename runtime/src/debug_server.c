@@ -12240,6 +12240,12 @@ void debug_server_init(int port)
 
     s_listen = socket(AF_INET, SOCK_STREAM, 0);
     if (s_listen == SOCK_INVALID) return;
+#ifdef _WIN32
+    /* Winsock sockets are inheritable by default: the overlay autocompile's
+     * cmd.exe/python children inherited this listener and kept port 4370
+     * bound after the game exited (next launch: connection refused). */
+    SetHandleInformation((HANDLE)s_listen, HANDLE_FLAG_INHERIT, 0);
+#endif
 
     int yes = 1;
     setsockopt(s_listen, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof(yes));

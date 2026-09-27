@@ -2128,6 +2128,32 @@ static int lazy_load_selected(int li) {
     return loaded;
 }
 
+static int try_load_region(uint32_t phys);
+/* Miss cache for try_load_region. Without it every interpreted dispatch in the
+ * overlay window that has no registered entry re-walks the lazy manifest and
+ * re-validates every covering bundle against RAM -- once per BLOCK. SmackDown 2's
+ * FMV decode loop (uncompiled overlay, non-CPS so the range-owner shortcut below
+ * does not apply) fell to ~3 vblanks/s with the cache on vs 60 with it off. A
+ * miss is remembered per PC for ~one frame of guest time; the interpreter is
+ * always correct, so a newly publishable shard is at most one frame late. */
+#define TLR_MISS_SLOTS  4096u
+#define TLR_MISS_SHIFT  19          /* 2^19 guest cycles ~= 15.5 ms */
+static uint32_t s_tlr_miss_pc[TLR_MISS_SLOTS];
+static uint32_t s_tlr_miss_epoch[TLR_MISS_SLOTS];
+static uint64_t s_tlr_miss_skips;
+
+static int try_load_region_cached(uint32_t phys) {
+    uint32_t slot  = (phys * 2654435761u) >> 20;             /* 12-bit hash */
+    uint32_t epoch = (uint32_t)(psx_get_cycle_count() >> TLR_MISS_SHIFT) + 1u;
+    if (s_tlr_miss_pc[slot] == phys && s_tlr_miss_epoch[slot] == epoch) {
+        s_tlr_miss_skips++;
+        return 0;
+    }
+    int ok = try_load_region(phys);
+    if (!ok) { s_tlr_miss_pc[slot] = phys; s_tlr_miss_epoch[slot] = epoch; }
+    return ok;
+}
+
 static int try_load_region(uint32_t phys) {
     extern uint32_t dirty_ram_get_bitmap_word(uint32_t word_index);
 
@@ -2325,7 +2351,7 @@ retry_candidates:
         exact_needs_load = lazy_exact &&
             (loaded_range_ci < 0 || s_cand[loaded_range_ci].device_touch);
         if (head < 0 && (loaded_range_ci < 0 || exact_needs_load) &&
-            !lazy_loaded && try_load_region(phys)) {
+            !lazy_loaded && try_load_region_cached(phys)) {
             lazy_loaded = 1;
             goto retry_candidates;
         }
@@ -2638,7 +2664,7 @@ retry_candidates:
      * preserves additive variant coverage without turning one guest transition
      * into an unbounded synchronous LoadLibrary loop. */
     if (!lazy_loaded && s_active && overlay_cache_window_contains(phys) &&
-        try_load_region(phys)) {
+        try_load_region_cached(phys)) {
         lazy_loaded = 1;
         goto retry_candidates;
     }
