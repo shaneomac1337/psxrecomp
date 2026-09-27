@@ -62,6 +62,7 @@ static uint8_t pad_rumble_map[PSX_MAX_PLAYERS][6] = {
     PSX_PAD_INIT({ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF })
 };
 static PSX_BSS uint8_t pad_rumble_small[PSX_MAX_PLAYERS];
+static PSX_BSS uint32_t pad_rumble_map_cmds[PSX_MAX_PLAYERS];  /* 0x4D seen */
 static PSX_BSS uint8_t pad_rumble_large[PSX_MAX_PLAYERS];
 
 /* Analog-mode lock, per logical pad. A real DualShock's config command 0x44
@@ -1007,6 +1008,12 @@ void sio_set_pad_config_capable(int slot, int capable) {
     }
 }
 
+void sio_get_pad_rumble_map(int slot, uint8_t map[6], uint32_t *map_cmds) {
+    if (slot < 0 || slot >= PSX_MAX_PLAYERS) return;
+    if (map) memcpy(map, pad_rumble_map[slot], 6);
+    if (map_cmds) *map_cmds = pad_rumble_map_cmds[slot];
+}
+
 void sio_get_pad_rumble(int slot, uint8_t *small, uint8_t *large) {
     uint8_t s = 0, l = 0;
     if (slot >= 0 && slot < PSX_MAX_PLAYERS && (pad_connected & (1u << slot))) {
@@ -1372,8 +1379,10 @@ static void pad_process_byte(uint8_t tx_byte) {
                 pad_response[3] = pad_analog[lp] ? 0x01 : 0x00;
             /* 0x4D returns the previous six-byte motor map while latching the
              * replacement bytes later in this same transaction. */
-            if (tx_byte == 0x4D)
+            if (tx_byte == 0x4D) {
                 memcpy(&pad_response[2], pad_rumble_map[lp], 6);
+                pad_rumble_map_cmds[lp]++;   /* observability: pad_rumble */
+            }
             pad_response_len = 8;
             pad_state = PAD_SEND_RESPONSE;
             sio_rx_data = pad_response[0];

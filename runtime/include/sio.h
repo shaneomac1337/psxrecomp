@@ -178,6 +178,9 @@ void sio_set_pad_config_capable(int slot, int capable);
  * motor byte; `large` is the variable-strength low-frequency motor byte.
  * The frontend translates these values to its host controller API. */
 void sio_get_pad_rumble(int slot, uint8_t *small, uint8_t *large);
+/* Current 0x4D motor map (6 bytes, 0x00 small / 0x01 large / 0xFF unused) and
+ * how many 0x4D commands the slot has received. Observability only. */
+void sio_get_pad_rumble_map(int slot, uint8_t map[6], uint32_t *map_cmds);
 
 /* Return current pad button state (for debug server). _slot targets a logical
  * pad 0 .. PSX_MAX_PLAYERS-1. */

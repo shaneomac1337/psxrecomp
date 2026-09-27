@@ -4451,8 +4451,13 @@ static int pad_mode_boot_analog(int mode) {
  * plain digital pad (SCPH-1080). Leaving keyboard slots in ANALOG/policy mode made
  * P2–P5 show as connected while games that expect digital multitap pads never
  * saw usable button input. */
+/* Debug-server test hook ("pad_analog"): let keyboard slots keep their
+ * configured mode so headless runs can exercise DualShock-only paths. */
+extern "C" { int g_debug_keyboard_keeps_mode = 0; }
+
 static int effective_player_mode(const PlayerInput& p) {
-    if (p.kind == 1) return (int)PSXRecompV4::PAD_MODE_DIGITAL;
+    if (p.kind == 1 && !g_debug_keyboard_keeps_mode)
+        return (int)PSXRecompV4::PAD_MODE_DIGITAL;
     return p.mode;
 }
 

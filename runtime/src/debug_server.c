@@ -7694,6 +7694,45 @@ extern uint16_t sio_get_pad_buttons_slot(int slot);
 extern int sio_get_pad_connected(int slot);
 extern int sio_get_pad_analog(int slot);
 extern void sio_get_pad_sticks(int slot, uint8_t out[4]);
+/* {"cmd":"pad_rumble"} -> the emulated DualShock motor values per slot (what
+ * the game last wrote through its 0x4D-mapped poll bytes), independent of
+ * whether a host controller is attached to forward them to. */
+static void handle_pad_rumble(int id, const char *json)
+{
+    (void)json;
+    char buf[1024];
+    int o = snprintf(buf, sizeof buf, "{\"id\":%d,\"ok\":true,\"slots\":[", id);
+    for (int s = 0; s < PSX_MAX_PLAYERS && o < (int)sizeof buf - 64; s++) {
+        uint8_t small = 0, large = 0, map[6] = {0};
+        uint32_t map_cmds = 0;
+        sio_get_pad_rumble(s, &small, &large);
+        sio_get_pad_rumble_map(s, map, &map_cmds);
+        o += snprintf(buf + o, sizeof buf - (size_t)o,
+                      "%s{\"small\":%u,\"large\":%u,\"map\":\"%02x%02x%02x%02x%02x%02x\",\"map_cmds\":%u}",
+                      s ? "," : "", (unsigned)small, (unsigned)large,
+                      map[0], map[1], map[2], map[3], map[4], map[5], (unsigned)map_cmds);
+    }
+    snprintf(buf + o, sizeof buf - (size_t)o, "]}");
+    send_fmt("%s", buf);
+}
+
+/* {"cmd":"pad_analog","slot":N,"on":0|1} -> present slot N as a
+ * config-capable DualShock (on) or a plain digital pad (off). Test tooling:
+ * keyboard-driven slots are always digital, so a headless run could not
+ * otherwise exercise DualShock-only paths such as the 0x4D rumble map. */
+static void handle_pad_analog(int id, const char *json)
+{
+    int slot = json_get_int(json, "slot", 0);
+    int on = json_get_int(json, "on", 1) ? 1 : 0;
+    if (slot < 0 || slot >= PSX_MAX_PLAYERS) { send_err(id, "bad slot"); return; }
+    extern int g_debug_keyboard_keeps_mode;
+    g_debug_keyboard_keeps_mode = on;   /* keep the per-frame input path from
+                                         * forcing keyboard slots back to digital */
+    sio_set_pad_analog(slot, on, 0x80, 0x80, 0x80, 0x80);
+    sio_set_pad_config_capable(slot, on);
+    send_ok(id);
+}
+
 static void handle_pad_status(int id, const char *json)
 {
     (void)json;
@@ -13999,6 +14038,8 @@ static const CmdEntry s_commands[] = {
     { "set_input",         handle_set_input },
     { "press",             handle_press },
     { "pad_status",        handle_pad_status },
+    { "pad_rumble",        handle_pad_rumble },
+    { "pad_analog",        handle_pad_analog },
     { "clear_input",       handle_clear_input },
     { "input_route_clear", handle_input_route_clear },
     { "input_route_append",handle_input_route_append },
