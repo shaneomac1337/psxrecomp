@@ -33,12 +33,14 @@
  */
 
 #include "bios_hle.h"
+#include "bios_caller_patch.h"
 #include "psx_memory.h"
 
 #include "cpu_state.h"
 #include "psx_cycles.h"
 
 #include <stddef.h>
+#include <string.h>
 
 /* fntrace.c — game-entry handoff latch (drives the boot turbo window). */
 extern int fntrace_is_game_started(void);
@@ -305,17 +307,157 @@ int psx_bios_hle_boot_turbo_active(void)
     return s_boot_skip_on && !fntrace_is_game_started();
 }
 
+/* ── BIOS counter-patches of the calling game code ───────────────────────── *
+ *
+ * Psy-Q's kernel patchers call B0:56 GetC0Table / B0:57 GetB0Table and then
+ * poke the retail kernel at fixed offsets. OpenBIOS recognises the patcher
+ * from the words after the call, does the patch's job in its own kernel, and
+ * rewrites those words so the pokes are skipped (bios_caller_patch.h). The
+ * retail BIOS never writes game code, and a game that checksums its code
+ * would see the rewrite as tampering.
+ *
+ * So the table query runs here as a nested LLE call with the BIOS's stores to
+ * the 16 words after the call diverted into a side buffer: the BIOS still
+ * decides and applies the patch to its own state, the game's bytes stay as
+ * loaded, and the guest resumes where the patched words would have taken it.
+ * A rewrite of any other shape (or one that would resume mid-function in clean
+ * compiled EXE text, which the dispatcher cannot enter) is written to RAM as
+ * the BIOS asked, and recorded as refused. Retail BIOSes write nothing there,
+ * so for them this is the plain call. Not HLE: every BIOS instruction runs. */
+
+static int      s_in_table_query = 0;
+static uint32_t s_div_lo, s_div_hi;  /* diverted RAM window, physical */
+static uint32_t s_div_words[PSX_CALLER_PATCH_WINDOW_WORDS];
+static void (*s_wr_word)(uint32_t, uint32_t);
+static void (*s_wr_half)(uint32_t, uint16_t);
+static void (*s_wr_byte)(uint32_t, uint8_t);
+static uint64_t s_caller_patches = 0;
+static uint64_t s_caller_patch_refused = 0;
+
+static uint32_t ram_phys(uint32_t addr)
+{
+    uint32_t p = addr & 0x1FFFFFFFu;
+    return p < 0x00800000u ? (p & (psx_ram_live_bytes() - 1u)) : p;
+}
+
+static int div_index(uint32_t addr, uint32_t* idx)
+{
+    uint32_t p = ram_phys(addr);
+    if (p < s_div_lo || p >= s_div_hi) return 0;
+    *idx = (p - s_div_lo) / 4u;
+    return 1;
+}
+
+static void div_write_word(uint32_t addr, uint32_t v)
+{
+    uint32_t i;
+    if (div_index(addr, &i)) s_div_words[i] = v;
+    else s_wr_word(addr, v);
+}
+
+static void div_write_half(uint32_t addr, uint16_t v)
+{
+    uint32_t i;
+    if (!div_index(addr, &i)) { s_wr_half(addr, v); return; }
+    uint32_t sh = (addr & 2u) * 8u;
+    s_div_words[i] = (s_div_words[i] & ~(0xFFFFu << sh)) | ((uint32_t)v << sh);
+}
+
+static void div_write_byte(uint32_t addr, uint8_t v)
+{
+    uint32_t i;
+    if (!div_index(addr, &i)) { s_wr_byte(addr, v); return; }
+    uint32_t sh = (addr & 3u) * 8u;
+    s_div_words[i] = (s_div_words[i] & ~(0xFFu << sh)) | ((uint32_t)v << sh);
+}
+
+/* Can the dispatcher enter `pc`? Clean compiled EXE text only at a function
+ * entry (dirty_ram_interp.c precise_pc_dispatchable); everything else is
+ * served by the static table, the overlay loader or the dirty-RAM path. */
+static int resume_dispatchable(uint32_t pc)
+{
+#ifdef PSX_HAS_GAME_DISPATCH
+    extern int psx_game_address_in_text(uint32_t addr);
+    extern int psx_game_is_function_entry(uint32_t addr);
+    extern int dirty_ram_is_dirty(uint32_t phys);
+    if (psx_game_address_in_text(pc) && !dirty_ram_is_dirty(pc & 0x1FFFFFFFu))
+        return psx_game_is_function_entry(pc);
+#endif
+    (void)pc;
+    return 1;
+}
+
+/* Service B0:56/57 called from game code. Returns PSX_BIOS_HLE_RESUMED with
+ * cpu->pc set, or 0 when the caller is not game code in RAM. */
+static int caller_patch_table_query(CPUState* cpu, uint32_t fn)
+{
+    const uint32_t n  = PSX_CALLER_PATCH_WINDOW_WORDS;
+    const uint32_t ra = cpu->gpr[31];
+    const uint32_t p  = ra & 0x1FFFFFFFu;
+    /* Game code: user RAM above the kernel's first 64 KiB. */
+    if ((ra & 3u) != 0 || p < 0x10000u || p + 4u * n > psx_ram_live_bytes())
+        return 0;
+
+    uint32_t orig[PSX_CALLER_PATCH_WINDOW_WORDS];
+    for (uint32_t i = 0; i < n; i++) orig[i] = cpu->read_word(ra + 4u * i);
+    memcpy(s_div_words, orig, sizeof orig);
+    s_div_lo = p;
+    s_div_hi = p + 4u * n;
+    s_wr_word = cpu->write_word;
+    s_wr_half = cpu->write_half;
+    s_wr_byte = cpu->write_byte;
+    cpu->write_word = div_write_word;
+    cpu->write_half = div_write_half;
+    cpu->write_byte = div_write_byte;
+    s_in_table_query = 1;
+    psx_dispatch_call(cpu, 0xB0u, ra);
+    s_in_table_query = 0;
+    cpu->write_word = s_wr_word;
+    cpu->write_half = s_wr_half;
+    cpu->write_byte = s_wr_byte;
+
+    PsxCallerPatchResume r = { ra, 0u, 0 };
+    if (psx_caller_patch_changed(orig, s_div_words, n)) {
+        if (psx_caller_patch_resume(ra, orig, s_div_words, n, &r) &&
+            resume_dispatchable(r.resume_pc)) {
+            s_caller_patches++;
+            hle_record(0xB0u, fn, cpu, r.resume_pc, PSX_HLE_ROUTE_CALLER_PATCH);
+            if (r.has_link) cpu->gpr[31] = r.link;
+        } else {
+            for (uint32_t i = 0; i < n; i++)
+                if (s_div_words[i] != orig[i])
+                    cpu->write_word(ra + 4u * i, s_div_words[i]);
+            s_caller_patch_refused++;
+            hle_record(0xB0u, fn, cpu, ra, PSX_HLE_ROUTE_CALLER_PATCH_REFUSED);
+            r.resume_pc = ra;
+        }
+    } else {
+        hle_record(0xB0u, fn, cpu, cpu->gpr[2], PSX_HLE_ROUTE_LLE);
+    }
+    cpu->pc = r.resume_pc;
+    return PSX_BIOS_HLE_RESUMED;
+}
+
+uint64_t psx_bios_caller_patch_count(void)   { return s_caller_patches; }
+uint64_t psx_bios_caller_patch_refused(void) { return s_caller_patch_refused; }
+
 /* ── the hook ────────────────────────────────────────────────────────────── */
 
 static int bios_hle_dispatch(struct CPUState* cpu, uint32_t phys)
 {
     if (phys == 0xB0u) {
         uint32_t fn = cpu->gpr[9]; /* $t1 — the PSY-Q thunk's function number */
+        if ((fn == 0x56u || fn == 0x57u) && !s_in_table_query) {
+            int rc = caller_patch_table_query(cpu, fn);
+            if (rc) return rc;
+        }
+        if (!s_call_hle_on && !s_boot_skip_on) return 0;
         int handled = s_call_hle_on ? hle_service_b0(cpu, fn) : 0;
         hle_record(0xB0u, fn, cpu, handled ? cpu->gpr[2] : 0u,
                    handled ? PSX_HLE_ROUTE_HLE : PSX_HLE_ROUTE_LLE);
         return handled;
     }
+    if (!s_call_hle_on && !s_boot_skip_on) return 0;
     if (phys == 0xA0u || phys == 0xC0u) {
         /* No A0/C0 services implemented in v1 — observe + fall through. */
         hle_record(phys, cpu->gpr[9], cpu, 0u, PSX_HLE_ROUTE_LLE);
@@ -346,8 +488,10 @@ void psx_bios_hle_configure(int call_hle, int boot_skip)
      * shell-skip latch must arm again or peers run the interactive shell and
      * appear hung after netplay lockstep. */
     s_shell_skipped = 0;
-    g_psx_bios_hle_hook =
-        (s_call_hle_on || s_boot_skip_on) ? &bios_hle_dispatch : NULL;
+    /* Always installed: B0:56/57 from game code is served as a caller-patch
+     * table query (above) whatever the tiers. With both tiers off that is
+     * all the hook does. */
+    g_psx_bios_hle_hook = &bios_hle_dispatch;
 }
 
 int psx_bios_hle_enabled(void)           { return s_call_hle_on; }

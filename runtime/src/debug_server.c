@@ -3680,11 +3680,13 @@ static void handle_bios_info(int id, const char *json)
 /* hle_dump — query the BIOS-HLE tier's always-on call ring (bios_hle.c).
  * Records every A0/B0/C0 vector dispatch seen by the HLE hook with its
  * routing decision (0 = fell through to LLE, 1 = serviced in HLE, 2 = boot
- * shell-skip), args, result, and guest cycle. Empty when the tier is off
- * (LLE mode installs no hook; the bioscall ring covers that case).
+ * shell-skip, 3 = caller patch run as control flow with v0 = the resume PC,
+ * 4 = caller patch refused and written to RAM), args, result, and guest
+ * cycle. With the tier off it holds only the B0:56/57 table queries from game
+ * code (the bioscall ring covers the rest).
  *   {"cmd":"hle_dump","tail":N}          last N ring entries
  *   {"cmd":"hle_dump"}                   status summary (mode + totals)
- * Optional filters: "fn":N (t1 index), "route":0|1|2. */
+ * Optional filters: "fn":N (t1 index), "route":0..4. */
 static void handle_hle_dump(int id, const char *json)
 {
     int  tail       = json_get_int(json, "tail", 0);
@@ -3695,11 +3697,14 @@ static void handle_hle_dump(int id, const char *json)
         char out[256];
         snprintf(out, sizeof out,
                  "{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"boot_skip\":%d,"
-                 "\"boot_turbo_active\":%d,\"total\":%llu}\n",
+                 "\"boot_turbo_active\":%d,\"total\":%llu,"
+                 "\"caller_patches\":%llu,\"caller_patches_refused\":%llu}\n",
                  id, psx_bios_hle_backend_name(),
                  psx_bios_hle_boot_skip_enabled(),
                  psx_bios_hle_boot_turbo_active(),
-                 (unsigned long long)total);
+                 (unsigned long long)total,
+                 (unsigned long long)psx_bios_caller_patch_count(),
+                 (unsigned long long)psx_bios_caller_patch_refused());
         debug_server_send_line(out);
         return;
     }

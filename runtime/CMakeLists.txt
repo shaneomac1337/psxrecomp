@@ -1173,6 +1173,15 @@ if(BUILD_TESTING)
     target_include_directories(kernel_patch_ranges_test PRIVATE include)
     add_test(NAME kernel_patch_ranges_test COMMAND kernel_patch_ranges_test)
 
+    # A BIOS counter-patch of the calling game code (OpenBIOS's answer to the
+    # Psy-Q kernel patchers) must run as control flow: resume where the
+    # patched words lead, refuse any shape that is not NOPs and a forward `b`.
+    add_executable(bios_caller_patch_test
+        tests/test_bios_caller_patch.c
+        src/bios_caller_patch.c)
+    target_include_directories(bios_caller_patch_test PRIVATE include)
+    add_test(NAME bios_caller_patch_test COMMAND bios_caller_patch_test)
+
     # The player-facing "skip the BIOS" flag must resolve to the same boot
     # behaviour on retail SCPH-1001 and on the bundled OpenBIOS, whose
     # kernel-call HLE is (correctly) refused for want of a DeliverEvent anchor.

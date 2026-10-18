@@ -437,6 +437,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/psx_netplay_sched.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_selfcheck.c
     ${PSXRECOMP_ROOT}/runtime/src/bios_hle.c
+    ${PSXRECOMP_ROOT}/runtime/src/bios_caller_patch.c
     ${PSXRECOMP_ROOT}/runtime/src/bios_hle_plan.c
     ${PSXRECOMP_ROOT}/runtime/src/savestate.c
     ${PSXRECOMP_ROOT}/runtime/src/video_texture_filter.c

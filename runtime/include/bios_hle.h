@@ -18,7 +18,14 @@
  * guest state (the REAL kernel structures in guest RAM — EvCB table etc., per
  * docs/psx_bios_disasm.txt + the SCPH1001 kernel disassembly), charges an
  * approximate cycle cost, and returns 1: the guest resumes at $ra with no
- * BIOS dispatch. NULL hook (default) = pure LLE, byte-identical dispatch.
+ * BIOS dispatch. A hook that sets cpu->pc itself returns PSX_BIOS_HLE_RESUMED.
+ *
+ * Caller patches (always on, both tiers or none): B0:56 GetC0Table and B0:57
+ * GetB0Table called from game code run as a nested LLE call whose stores to
+ * the 16 words after the call are kept out of RAM; the guest resumes where
+ * those patched words lead (bios_caller_patch.h). OpenBIOS answers the Psy-Q
+ * kernel patchers by rewriting exactly those words; a retail BIOS writes
+ * nothing there. With both tiers off this is the only thing the hook does.
  *
  * Boot HLE: with the tier on (and no keep-intro opt-out) the hook also
  * intercepts the first dispatch of the BIOS SHELL entry (RAM 0x30000 — the
@@ -59,8 +66,14 @@ extern "C" {
 struct CPUState;
 
 /* The dispatch hook slot the generated trampoline consults (defined in
- * bios_hle.c, emitted-extern by full_function_emitter.cpp). NULL = pure LLE. */
+ * bios_hle.c, emitted-extern by full_function_emitter.cpp). NULL = pure LLE.
+ * Return 0 = not handled, 1 = handled and resume at $ra,
+ * PSX_BIOS_HLE_RESUMED = handled and cpu->pc already set. The generated
+ * dispatch defines the same value. */
 extern int (*g_psx_bios_hle_hook)(struct CPUState* cpu, uint32_t phys);
+#ifndef PSX_BIOS_HLE_RESUMED
+#define PSX_BIOS_HLE_RESUMED 2
+#endif
 
 /* Select the BIOS backend. Call at bring-up (and again on netplay rematch
  * session_reboot), after config + env resolution, before psx_scheduler_run.
@@ -72,8 +85,8 @@ extern int (*g_psx_bios_hle_hook)(struct CPUState* cpu, uint32_t phys);
  *               deprecated fast_boot alias, which skips boot only); requires
  *               only the image's shell_entry_phys anchor, and is clamped to it
  *               here so the reported state cannot overstate what can fire
- * Clears the shell-skip latch so rematch can skip again. The hook is installed
- * when either axis is on; both off = NULL = pure LLE. */
+ * Clears the shell-skip latch so rematch can skip again. The hook is always
+ * installed: with both axes off it only serves caller patches (above). */
 void psx_bios_hle_configure(int call_hle, int boot_skip);
 
 int         psx_bios_hle_enabled(void);
@@ -85,12 +98,23 @@ const char* psx_bios_hle_backend_name(void); /* startup banner */
  * this into the turbo predicate so kernel init + EXE load run at host speed. */
 int psx_bios_hle_boot_turbo_active(void);
 
+/* Caller patches run as control flow, and rewrites refused (and so written
+ * to RAM as the BIOS asked), since boot. */
+uint64_t psx_bios_caller_patch_count(void);
+uint64_t psx_bios_caller_patch_refused(void);
+
 /* ── Always-on HLE ring (queried by debug_server "hle_dump") ─────────────── */
 
 enum {
     PSX_HLE_ROUTE_LLE  = 0,  /* vector call seen, fell through to recompiled BIOS */
     PSX_HLE_ROUTE_HLE  = 1,  /* serviced in HLE */
     PSX_HLE_ROUTE_BOOT = 2,  /* boot shell-skip fired */
+    PSX_HLE_ROUTE_CALLER_PATCH = 3,          /* table query: BIOS rewrite of the
+                                                caller run as control flow;
+                                                v0 = the resume PC */
+    PSX_HLE_ROUTE_CALLER_PATCH_REFUSED = 4,  /* table query: rewrite of an
+                                                unsupported shape, written to
+                                                RAM; v0 = $ra */
 };
 
 typedef struct PsxHleCallEntry {

@@ -361,21 +361,32 @@ Always-on ring (`runtime/src/bios_hle.c`, 16K entries) recording every
 A0/B0/C0 kernel-vector dispatch the HLE tier's hook observes, plus the boot
 shell-skip event.
 
-The hook is installed when EITHER axis is on (`bios_hle_plan.h`), so a run with
-the boot-skip on but kernel calls left to LLE — the default on the bundled
-OpenBIOS, which exports no `deliver_event_ret` — reports
+With EITHER axis on (`bios_hle_plan.h`) the ring observes every vector call,
+so a run with the boot-skip on but kernel calls left to LLE — the default on the
+bundled OpenBIOS, which exports no `deliver_event_ret` — reports
 `backend: "LLE (recompiled BIOS)"` and still fills the ring with `route: 0`
-vector observations plus the one `route: 2` boot entry. Only a run with BOTH axes
-off installs no hook and leaves the ring empty; use `bioscall_dump` for LLE-side
-vector observation there.
+vector observations plus the one `route: 2` boot entry. With BOTH axes off the
+hook only serves caller patches, so the ring holds just the B0:56/57 table
+queries from game code; use `bioscall_dump` for LLE-side vector observation
+there.
+
+Caller patches: B0:56 GetC0Table / B0:57 GetB0Table called from game code run
+as a nested LLE call whose stores to the 16 words after the call are kept out
+of RAM. OpenBIOS answers the Psy-Q kernel patchers by rewriting those words;
+the guest instead resumes where the rewrite leads (`bios_caller_patch.h`), so
+game code in RAM stays as loaded. A rewrite of another shape is written to RAM
+as the BIOS asked and counted as refused.
 
 - `{"cmd":"hle_dump"}` — status: `backend` (`HLE (LLE fallback)` /
-  `LLE (recompiled BIOS)`), `boot_skip`, `boot_turbo_active`, `total`.
+  `LLE (recompiled BIOS)`), `boot_skip`, `boot_turbo_active`, `total`,
+  `caller_patches` (rewrites run as control flow), `caller_patches_refused`.
 - `{"cmd":"hle_dump","tail":N}` — last N entries: `seq`, `cycle` (guest
   cycle), `vec` (0xA0/0xB0/0xC0, or 0x30000 for the boot skip), `fn` ($t1
-  function number), `a0..a3`, `ra`, `v0` (result when HLE-serviced), `route`
-  (0 = fell through to LLE, 1 = serviced in HLE, 2 = boot shell-skip).
-- Filters: `"fn":N`, `"route":0|1|2`.
+  function number), `a0..a3`, `ra`, `v0` (result when HLE-serviced; the resume
+  PC for route 3), `route` (0 = fell through to LLE, 1 = serviced in HLE,
+  2 = boot shell-skip, 3 = caller patch run as control flow, 4 = caller patch
+  refused and written to RAM).
+- Filters: `"fn":N`, `"route":0..4`.
 
 ---
 

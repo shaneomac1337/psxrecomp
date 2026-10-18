@@ -29,9 +29,14 @@ extern void debug_server_trace_dispatch(uint32_t func_addr);
  * target. Installed by the runtime (bios_hle.c) when [runtime] bios_hle
  * is on; returns 1 when it fully serviced the target, and the guest
  * resumes at $ra exactly as if the kernel routine executed jr $ra.
+ * PSX_BIOS_HLE_RESUMED (2) means the hook set cpu->pc itself (a BIOS
+ * counter-patch of the caller run as control flow, bios_hle.c).
  * NULL (the default) = pure LLE, dispatch identical to a build without
  * the tier. */
 extern int (*g_psx_bios_hle_hook)(CPUState* cpu, uint32_t phys);
+#ifndef PSX_BIOS_HLE_RESUMED
+#define PSX_BIOS_HLE_RESUMED 2
+#endif
 
 extern uint32_t g_psx_mod_guest_functions;
 extern int psx_mod_dispatch_guest_function(CPUState*, uint32_t);
@@ -9102,11 +9107,14 @@ static void psx_dispatch_impl(CPUState* cpu, uint32_t addr, uint32_t stop_addr) 
          * game-text/dirty-RAM window, so the check cannot sit after those
          * backends. Handled (rc 1) ⇒ the service completed against guest
          * state and the guest resumes at $ra via the trampoline's normal
-         * return/tail contract below. rc 0 ⇒ pure LLE fall-through. */
-        if (!found && g_psx_bios_hle_hook &&
-            g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu)) {
-            cpu->pc = cpu->gpr[31];
-            found = 1;
+         * return/tail contract below; rc PSX_BIOS_HLE_RESUMED ⇒ the
+         * hook set cpu->pc. rc 0 ⇒ pure LLE fall-through. */
+        if (!found && g_psx_bios_hle_hook) {
+            int hle_rc_ = g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu);
+            if (hle_rc_) {
+                if (hle_rc_ != PSX_BIOS_HLE_RESUMED) cpu->pc = cpu->gpr[31];
+                found = 1;
+            }
         }
         /* Byte-guarded A0/B0/C0 call-vector tail stubs. */
         if (!found && psx_bios_try_native_call_stub(cpu, addr))

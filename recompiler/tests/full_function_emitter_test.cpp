@@ -273,6 +273,22 @@ void mod_guest_dispatch_precedes_hardware_routes() {
            "no active mod guest functions keeps the dispatch path dormant");
 }
 
+// A BIOS hook may resume the guest somewhere other than $ra (bios_hle.c runs
+// a BIOS counter-patch of the caller as control flow): rc 2 keeps the PC the
+// hook set, any other nonzero rc resumes at $ra as before.
+void bios_hook_may_name_its_resume_pc() {
+    const auto result = run_case("hle-resume-pc", {0x03E00008u, 0u},
+                                {function_at(kBase, kBase + 4u, {kBase})});
+    const auto dispatch = result.dispatch.find("static void psx_dispatch_impl(");
+    const auto call = result.dispatch.find("g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu)", dispatch);
+    const auto keep = result.dispatch.find("if (hle_rc_ != PSX_BIOS_HLE_RESUMED)", call);
+    const auto ra = result.dispatch.find("cpu->pc = cpu->gpr[31];", keep);
+    expect(call != std::string::npos && keep != std::string::npos && ra == keep + sizeof("if (hle_rc_ != PSX_BIOS_HLE_RESUMED) ") - 1,
+           "a hook returning PSX_BIOS_HLE_RESUMED keeps its own resume PC");
+    expect(result.dispatch.find("#define PSX_BIOS_HLE_RESUMED 2") != std::string::npos,
+           "the dispatch file defines the resume code the runtime header uses");
+}
+
 int main() {
     BiosConfig config{};
     config.config_path = "test://full-function-emitter";
@@ -296,6 +312,7 @@ int main() {
     noncomplementary_lwl_falls_back();
     complementary_lwl_lwr_stays_native();
     mod_guest_dispatch_precedes_hardware_routes();
+    bios_hook_may_name_its_resume_pc();
     patch_range_guards(config);
     patch_range_delay_boundaries(config);
 
