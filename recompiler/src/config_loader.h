@@ -1147,6 +1147,10 @@ struct GameConfig {
     std::vector<uint32_t> mod_function_entry_funcs;
     // Opt-in pre-instruction callbacks; plugins supply exact-word guards.
     std::vector<uint32_t> mod_instruction_sites;
+    // The same callbacks, compiled only into builds with debug tools
+    // (emitted inside #ifndef PSX_NO_DEBUG_TOOLS): development
+    // instrumentation that a release binary must not carry.
+    std::vector<uint32_t> debug_instruction_sites;
 
     // [recompiler] hot_funcs: guest addresses that get __attribute__((hot))
     // on their generated C bodies (profile/host locality; no guest semantics).

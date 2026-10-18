@@ -81,6 +81,8 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
     // does not use the feature keeps the hash (and every overlay cache) it had.
     if (!c.mod_instruction_sites.empty())
         h.words("mod_instruction_sites", c.mod_instruction_sites);
+    if (!c.debug_instruction_sites.empty())
+        h.words("debug_instruction_sites", c.debug_instruction_sites);
     h.words("cull_bias", c.ws_cull_bias_sites);
     if (!c.ws_cull_bias_lower_sites.empty())
         h.words("cull_bias_lower", c.ws_cull_bias_lower_sites);
@@ -2016,6 +2018,14 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                 throw std::runtime_error("mod instruction site must be aligned main RAM");
             mod_instruction_sites.push_back(pc);
         }
+    std::vector<uint32_t> debug_instruction_sites;
+    if (recomp.contains("debug_instruction_sites"))
+        for (const auto& a : toml::find<std::vector<std::string>>(recomp, "debug_instruction_sites")) {
+            const auto pc = parse_hex(a, "recompiler.debug_instruction_sites");
+            if ((pc & 3u) || pc >= 0xC0000000u || (pc & 0x1FFFFFFFu) >= 0x00800000u)
+                throw std::runtime_error("debug instruction site must be aligned main RAM");
+            debug_instruction_sites.push_back(pc);
+        }
     std::vector<uint32_t> mod_function_entry_funcs;
     if (recomp.contains("mod_function_entry_funcs")) {
         const auto& arr = toml::find<std::vector<std::string>>(
@@ -2790,6 +2800,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*data_shard_funcs*/      data_shard_funcs,
         /*mod_function_entry_funcs*/ mod_function_entry_funcs,
         /*mod_instruction_sites*/ mod_instruction_sites,
+        /*debug_instruction_sites*/ debug_instruction_sites,
         /*hot_funcs*/             hot_funcs,
         /*load_charge_batch*/     load_charge_batch,
         /*load_charge_batch_funcs*/ load_charge_batch_funcs,

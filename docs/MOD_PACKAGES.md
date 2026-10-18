@@ -1010,6 +1010,15 @@ Only active resolved plugins run, with their feature's resource context.
 The dirty-RAM backend uses the same checks, including nested delay slots.
 Overlay ABI v27 carries the forwarder; site metadata changes the codegen hash.
 
+Sites listed in `[recompiler] debug_instruction_sites` instead get the same
+call inside `#ifndef PSX_NO_DEBUG_TOOLS`, so a build without debug tools (a
+plain Release build) compiles no call there at all. Use it for development
+instrumentation, such as a title's integrity tripwire, that a release binary
+must not carry; register the callbacks only in debug-tools builds too.
+Overlay shards built into the runtime target follow the same switch. Shards
+compiled at run time by the autocompiler are not built with the target's
+definitions and keep the call (it returns at once with no hooks registered).
+
 Callbacks may change registers and data. They must preserve PC and must not
 re-enter guest execution, because pending branch/load state is live.
 `psx_mod_finish_function` is unavailable in this callback scope. Inactive plans

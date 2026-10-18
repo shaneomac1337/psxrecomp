@@ -67,6 +67,9 @@ struct CodeGenConfig {
     // Only explicitly listed guest functions call the runtime dispatcher.
     std::set<uint32_t> mod_function_entry_funcs;
     std::set<uint32_t> mod_instruction_sites;
+    // [recompiler] debug_instruction_sites: same call, inside
+    // #ifndef PSX_NO_DEBUG_TOOLS (absent from release builds).
+    std::set<uint32_t> debug_instruction_sites;
 
     // [recompiler] symbols: guest function names from the game's symbols.toml
     // ([[func]] pc/name). A named body gets a `/* Name */` label, and the game

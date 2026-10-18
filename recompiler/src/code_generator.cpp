@@ -918,11 +918,18 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
 }
 
 std::string CodeGenerator::mod_instruction_call(uint32_t addr, uint32_t instr) const {
-    const bool selected = std::any_of(config_.mod_instruction_sites.begin(),
-        config_.mod_instruction_sites.end(), [=](uint32_t site) {
+    const auto listed = [=](const std::set<uint32_t>& sites) {
+        return std::any_of(sites.begin(), sites.end(), [=](uint32_t site) {
             return (site & 0x1FFFFFFFu) == (addr & 0x1FFFFFFFu);
         });
-    return selected ? fmt::format("psx_mod_instruction(cpu, 0x{:08X}u, 0x{:08X}u);\n", addr, instr) : "";
+    };
+    const std::string call =
+        fmt::format("psx_mod_instruction(cpu, 0x{:08X}u, 0x{:08X}u);\n", addr, instr);
+    if (listed(config_.mod_instruction_sites)) return call;
+    // A debug-only site: builds without debug tools compile no call at all.
+    if (listed(config_.debug_instruction_sites))
+        return "#ifndef PSX_NO_DEBUG_TOOLS\n" + config_.indent + call + "#endif\n";
+    return "";
 }
 // [[draw_distance.clamp]]: a main-EXE ordering-table range guard. While a
 // mod has the clamps on, the site's register is clamped to `max` before the

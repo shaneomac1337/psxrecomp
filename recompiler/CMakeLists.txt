@@ -1053,6 +1053,14 @@ if(BUILD_TESTING)
                     --recompiler $<TARGET_FILE:psxrecomp-game>
                     --compiler ${CMAKE_C_COMPILER}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+        # [recompiler] debug_instruction_sites: calls absent without debug tools.
+        add_test(
+            NAME debug_instruction_sites_codegen
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_debug_instruction_sites_codegen.py
+                    --recompiler $<TARGET_FILE:psxrecomp-game>
+                    --compiler ${CMAKE_C_COMPILER}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
         # Gap ledger for docs/SEGMENT_AWARE_CODE.md: a synthetic KUSEG-linked
         # EXE, checked against a Beetle fetch-model transcription.
         add_test(
