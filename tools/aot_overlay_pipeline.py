@@ -71,6 +71,26 @@ def load_profile(profile_path, config):
     return profile
 
 
+def bios_resident_rom(profile):
+    """The BIOS ROM whose exact-hash resident recipes this profile compiles.
+
+    Resident code is a fact about one BIOS image (what it, or the SDK patchers
+    answering it, leave in kernel RAM). A profile that runs on a bundled BIOS
+    names it with ``bios_resident_rom``, a framework-relative path, so the
+    shard never depends on which ROM the machine building it happens to hold.
+    Otherwise the operator's PSXRECOMP_BIOS_ROM, else bios/SCPH1001.BIN."""
+    value = profile.get('bios_resident_rom')
+    if value is None:
+        return Path(os.environ.get('PSXRECOMP_BIOS_ROM') or FRAMEWORK / 'bios/SCPH1001.BIN')
+    require(isinstance(value, str) and value.strip(),
+            'bios_resident_rom must be a framework-relative path string')
+    posix = PurePosixPath(value.replace('\\', '/'))
+    require(not posix.is_absolute() and not PureWindowsPath(value).anchor
+            and '..' not in posix.parts,
+            f'bios_resident_rom must stay inside the framework: {value}')
+    return FRAMEWORK.joinpath(*posix.parts)
+
+
 def static_output(profile, project_root):
     """The overlays_static.c this title's build links, or None.
 
@@ -686,7 +706,8 @@ def prepare(profile, disc, records, output, views=None):
     verify_evidence(disc, profile.get('checks', []), views)
     sources = positioned_sources(disc, profile['images'], views, main_ram_bytes(profile))
     records, excluded_images = drop_excluded_records(profile, disc, records, sources, views)
-    bios = extractor.bios_resident_records() if profile.get('bios_resident') else []
+    bios = (extractor.bios_resident_records(str(bios_resident_rom(profile)))
+            if profile.get('bios_resident') else [])
     for record in records:
         if record.get('producer') == 'bios_resident_manifest':
             require(any(record == known for known in bios), 'Unverified BIOS resident recipe')
@@ -820,7 +841,8 @@ def extract(profile_path, game_toml, recompiler, output, cue=None, disc=None, pr
                '--disc', str(cue),
                '--out', str(output / 'generic.json'), '--tmp', str(output / 'extract-tmp'),
                '--project-root', str(FRAMEWORK)]
-    command += ['--require-bios-resident'] if profile.get('bios_resident') else ['--no-bios-resident']
+    command += (['--require-bios-resident', '--bios', str(bios_resident_rom(profile))]
+                if profile.get('bios_resident') else ['--no-bios-resident'])
     with (output / 'extract.log').open('w') as log:
         result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
@@ -1017,7 +1039,7 @@ def generation_inputs(profile_path, profile, game_toml, recompiler, disc_digests
                       for spec in profile.get('mod_packages', [])})
     if profile.get('bios_resident'):
         manifest = tools_dir / 'aot_overlay_spike/bios_resident_code.json'
-        rom = Path(os.environ.get('PSXRECOMP_BIOS_ROM') or FRAMEWORK / 'bios/SCPH1001.BIN')
+        rom = bios_resident_rom(profile)
         inputs['bios_resident'] = dict(manifest=digest(manifest) if manifest.is_file() else None,
                                        rom=digest(rom) if rom.is_file() else None)
     return inputs, hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()

@@ -1137,5 +1137,106 @@ class StaticGenerationTest(unittest.TestCase):
         self.assertIn('static requires --out-dir or a profile static_output', err)
 
 
+class BiosResidentImageTest(unittest.TestCase):
+    """Exact-hash BIOS-installed RAM code: the segment each entry is dispatched
+    in, and the BIOS ROM a profile's resident code was installed by."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.rom = self.root / 'bios.bin'
+        self.rom.write_bytes(bytes(range(256)) * 4)
+        self.sha = hashlib.sha256(self.rom.read_bytes()).hexdigest()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def manifest(self, segments):
+        path = self.root / 'resident.json'
+        path.write_text(json.dumps(dict(schema='psxrecomp bios resident code v1', images=[dict(
+            name='test install image', bios_sha256=self.sha,
+            region_start='0x80002000', region_size='0xC000',
+            code_fragments=[dict(address='0x8000281C', words=['0x3C020000', '0x24423554',
+                                                              '0x0040F809', '0x00000000']),
+                            dict(address='0x8000DFAC', words=['0x03E00008', '0x00000000'])],
+            dispatch_entry_pcs=['0x8000281C', '0x8000DFAC'],
+            dispatch_entry_segments=segments)])))
+        return path
+
+    def test_entries_keep_the_segment_they_are_dispatched_in(self):
+        records = pipeline.extractor.bios_resident_records(
+            str(self.rom), str(self.manifest(dict(kuseg=['0x0000281C'], kseg1=['0xA000DFAC']))))
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        # v3 capture semantics: dispatch_entry_pcs stays KSEG0-spelled and the
+        # segment record names where each one is entered.
+        self.assertEqual(record['dispatch_entry_pcs'], ['0x8000281C', '0x8000DFAC'])
+        self.assertEqual(record['dispatch_entry_segments'],
+                         dict(kuseg=['0x0000281C'], kseg1=['0xA000DFAC']))
+
+    def test_segment_entry_must_be_a_declared_entry_in_that_segment(self):
+        for segments in (dict(kuseg=['0x00002820']),        # not a declared entry
+                         dict(kseg1=['0x0000281C']),        # spelled in another segment
+                         dict(kseg2=['0xC000281C'])):       # no such RAM segment
+            with self.subTest(segments=segments), self.assertRaises(ValueError):
+                pipeline.extractor.bios_resident_records(str(self.rom), str(self.manifest(segments)))
+
+    def test_profile_names_the_bios_rom_that_installed_its_resident_code(self):
+        profile = dict(bios_resident=True, bios_resident_rom='bios/openbios.bin')
+        with mock.patch.dict(pipeline.os.environ, {'PSXRECOMP_BIOS_ROM': str(self.rom)}):
+            self.assertEqual(pipeline.bios_resident_rom(profile),
+                             pipeline.FRAMEWORK / 'bios/openbios.bin')
+            # Without a declaration the operator's ROM (or SCPH1001.BIN) is used.
+            self.assertEqual(pipeline.bios_resident_rom(dict(bios_resident=True)), self.rom)
+        with mock.patch.dict(pipeline.os.environ, {}, clear=True):
+            self.assertEqual(pipeline.bios_resident_rom(dict(bios_resident=True)),
+                             pipeline.FRAMEWORK / 'bios/SCPH1001.BIN')
+        with self.assertRaises(pipeline.ProfileError):
+            pipeline.bios_resident_rom(dict(bios_resident=True, bios_resident_rom='../x.bin'))
+
+    def test_extraction_reads_the_declared_rom(self):
+        profile = dict(game_id='TEST-00001', bios_resident=True, bios_resident_rom='bios/openbios.bin')
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            raise RuntimeError('stop after the extractor command')
+
+        toml = self.root / 'game.toml'
+        toml.write_text('[game]\nid = "TEST-00001"\ndisc = "x.cue"\n')
+        with mock.patch.object(pipeline.subprocess, 'run', side_effect=run), \
+                self.assertRaises(RuntimeError):
+            pipeline.extract(None, toml, self.root / 'recompiler', self.root / 'out',
+                             cue=self.root / 'x.cue', disc=object(), profile=profile)
+        command = commands[0]
+        self.assertIn('--require-bios-resident', command)
+        self.assertEqual(Path(command[command.index('--bios') + 1]),
+                         pipeline.FRAMEWORK / 'bios/openbios.bin')
+
+    def test_openbios_libcard_install_image_is_the_bundled_roms(self):
+        # On the bundled OpenBIOS a Psy-Q libcard title leaves three code
+        # fragments in kernel RAM: OpenBIOS's own InitCard stub at 0x281C
+        # (copied from its ROM), _patch_card's jump at 0x357C, and the libcard
+        # SIO helper at 0xDF80 (the same words SCPH-1001 titles install).
+        rom = pipeline.FRAMEWORK / 'bios/openbios.bin'
+        recipe = json.loads((pipeline.FRAMEWORK / 'tools/aot_overlay_spike/'
+                             'bios_resident_code.json').read_text(encoding='utf-8'))
+        sha = hashlib.sha256(rom.read_bytes()).hexdigest()
+        openbios = [image for image in recipe['images'] if image['bios_sha256'] == sha]
+        self.assertEqual(len(openbios), 1)
+        fragments = {int(f['address'], 16): [int(w, 16) for w in f['words']]
+                     for f in openbios[0]['code_fragments']}
+        self.assertEqual(sorted(fragments), [0x8000281C, 0x8000357C, 0x8000DF80])
+        self.assertEqual(fragments[0x8000281C],
+                         list(struct.unpack_from('<4I', rom.read_bytes(), 0x76F4)))
+        scph = [int(w, 16) for w in recipe['images'][0]['code_fragments'][0]['words']]
+        self.assertEqual(fragments[0x8000DF80], scph)
+        records = pipeline.extractor.bios_resident_records(str(rom))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['dispatch_entry_segments'],
+                         dict(kuseg=['0x0000281C', '0x0000357C'],
+                              kseg1=['0xA000DF80', '0xA000DFAC']))
+
+
 if __name__ == '__main__':
     unittest.main()

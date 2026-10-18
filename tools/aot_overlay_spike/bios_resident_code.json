@@ -1,35 +1,144 @@
 {
-  "schema": "psxrecomp bios resident code v1",
-  "images": [
+ "schema": "psxrecomp bios resident code v1",
+ "images": [
+  {
+   "name": "SCPH-1001 boot-installed device helper",
+   "bios_sha256": "71af94d1e47a68c11e8fdb9f8368040601514a42a5a399cda48c7d3bff1e99d3",
+   "region_start": "0x8000DF80",
+   "region_size": "0x70",
+   "evidence": {
+    "verified_snapshots": 415,
+    "verified_sessions": 10,
+    "distinct_code_images": 1,
+    "code_window_crc32": "0x4EE6AC69"
+   },
+   "code_fragments": [
     {
-      "name": "SCPH-1001 boot-installed device helper",
-      "bios_sha256": "71af94d1e47a68c11e8fdb9f8368040601514a42a5a399cda48c7d3bff1e99d3",
-      "region_start": "0x8000DF80",
-      "region_size": "0x70",
-      "evidence": {
-        "verified_snapshots": 415,
-        "verified_sessions": 10,
-        "distinct_code_images": 1,
-        "code_window_crc32": "0x4EE6AC69"
-      },
-      "code_fragments": [
-        {
-          "address": "0x8000DF80",
-          "words": [
-            "0x946F000A", "0x3C080000", "0x01E2C025", "0x37190012",
-            "0xA479000A", "0x24080028", "0x2508FFFF", "0x1500FFFE",
-            "0x00000000", "0x03E00008", "0x00000000", "0x8C621074",
-            "0x00000000", "0x30420080", "0x1040000B", "0x00000000",
-            "0x8C621044", "0x00000000", "0x30420080", "0x1440FFFC",
-            "0x00000000", "0x3C020001", "0x8C42DFFC", "0x00000000",
-            "0x00400008", "0x00000000", "0x03E00008", "0x00000000"
-          ]
-        }
-      ],
-      "dispatch_entry_pcs": [
-        "0x8000DF80", "0x8000DF98", "0x8000DFA4",
-        "0x8000DFAC", "0x8000DFC0", "0x8000DFD4"
-      ]
+     "address": "0x8000DF80",
+     "words": [
+      "0x946F000A",
+      "0x3C080000",
+      "0x01E2C025",
+      "0x37190012",
+      "0xA479000A",
+      "0x24080028",
+      "0x2508FFFF",
+      "0x1500FFFE",
+      "0x00000000",
+      "0x03E00008",
+      "0x00000000",
+      "0x8C621074",
+      "0x00000000",
+      "0x30420080",
+      "0x1040000B",
+      "0x00000000",
+      "0x8C621044",
+      "0x00000000",
+      "0x30420080",
+      "0x1440FFFC",
+      "0x00000000",
+      "0x3C020001",
+      "0x8C42DFFC",
+      "0x00000000",
+      "0x00400008",
+      "0x00000000",
+      "0x03E00008",
+      "0x00000000"
+     ]
     }
-  ]
+   ],
+   "dispatch_entry_pcs": [
+    "0x8000DF80",
+    "0x8000DF98",
+    "0x8000DFA4",
+    "0x8000DFAC",
+    "0x8000DFC0",
+    "0x8000DFD4"
+   ]
+  },
+  {
+   "name": "OpenBIOS kernel after a Psy-Q libcard title's InitCARD/_patch_card",
+   "bios_sha256": "fabe498fbf224e4721f12f31b6f5fe0659205e341dc4e5c5f91b9bd1a1011c57",
+   "region_start": "0x8000281C",
+   "region_size": "0xB7D4",
+   "evidence": {
+    "installers": {
+     "0x8000281C": "OpenBIOS InitCARD (B0:4A) copies ROM 0xBFC076F4 over the exceptionHandler install slot (bios/OpenBIOS.toml)",
+     "0x8000357C": "Psy-Q _patch_card (B0:56 GetC0Table) writes its jr 0xA000DFAC over exceptionHandlerCardFastTrack (install slot, resume none)",
+     "0x8000DF80": "Psy-Q libcard copies its SIO helper here, the same words SCPH-1001 titles install"
+    },
+    "observed": "write trace of Spyro: Year of the Dragon (SCUS-94467) at its first card access, frame 218: exactly these words, from the installers above",
+    "entered": "exception handler at KUSEG 0x281C/0x357C; jr 0xA000DFAC (and _patch_card2's jalr 0xA000DF80) through KSEG1"
+   },
+   "code_fragments": [
+    {
+     "address": "0x8000281C",
+     "words": [
+      "0x3C020000",
+      "0x24423554",
+      "0x0040F809",
+      "0x00000000"
+     ]
+    },
+    {
+     "address": "0x8000357C",
+     "words": [
+      "0x3C02A001",
+      "0x2442DFAC",
+      "0x00400008",
+      "0x00000000"
+     ]
+    },
+    {
+     "address": "0x8000DF80",
+     "words": [
+      "0x946F000A",
+      "0x3C080000",
+      "0x01E2C025",
+      "0x37190012",
+      "0xA479000A",
+      "0x24080028",
+      "0x2508FFFF",
+      "0x1500FFFE",
+      "0x00000000",
+      "0x03E00008",
+      "0x00000000",
+      "0x8C621074",
+      "0x00000000",
+      "0x30420080",
+      "0x1040000B",
+      "0x00000000",
+      "0x8C621044",
+      "0x00000000",
+      "0x30420080",
+      "0x1440FFFC",
+      "0x00000000",
+      "0x3C020001",
+      "0x8C42DFFC",
+      "0x00000000",
+      "0x00400008",
+      "0x00000000",
+      "0x03E00008",
+      "0x00000000"
+     ]
+    }
+   ],
+   "dispatch_entry_pcs": [
+    "0x8000281C",
+    "0x8000357C",
+    "0x8000DF80",
+    "0x8000DFAC"
+   ],
+   "dispatch_entry_segments": {
+    "kuseg": [
+     "0x0000281C",
+     "0x0000357C"
+    ],
+    "kseg1": [
+     "0xA000DF80",
+     "0xA000DFAC"
+    ]
+   }
+  }
+ ]
 }

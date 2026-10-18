@@ -870,6 +870,39 @@ def add_consensus_fallback(record,member):
             f"0x{addr:08X}" for addr in member['direct_seeds']]
     return record
 
+RESIDENT_SEGMENTS={'kuseg': 0x00000000, 'kseg0': 0x80000000, 'kseg1': 0xA0000000}
+
+
+def resident_entry_segments(spec, entries, parse, manifest_path):
+    """The capture-v3 segment record of a resident image's dispatch entries.
+
+    Installed kernel code is often entered outside KSEG0: the exception
+    handler runs at its KUSEG address and a patch may jump through KSEG1
+    (``jr 0xA000DFAC``). A compiled body bakes its segment into every PC it
+    produces, so a segment-qualified entry gets its own body
+    (docs/SEGMENT_AWARE_CODE.md section 5.7). Each listed PC must be one of
+    the image's dispatch entries, spelled in the segment it is listed under.
+    Entries no segment lists stay KSEG0, as in a v2 capture."""
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError(f'{manifest_path}: dispatch_entry_segments must be an object')
+    out={}
+    for name, values in spec.items():
+        seg=RESIDENT_SEGMENTS.get(name)
+        if seg is None:
+            raise ValueError(f'{manifest_path}: dispatch_entry_segments: unknown '
+                             f'segment {name!r}')
+        pcs=sorted({parse(value) for value in values})
+        for pc in pcs:
+            if (pc & 0xE0000000) != seg or \
+                    ((pc & 0x1FFFFFFF) | 0x80000000) not in entries:
+                raise ValueError(f'{manifest_path}: dispatch_entry_segments.{name}: '
+                                 f'0x{pc:08X} is not a dispatch entry spelled in {name}')
+        out[name]=[f'0x{pc:08X}' for pc in pcs]
+    return out
+
+
 def bios_resident_records(bios_path=None, manifest_path=None):
     """Build guarded captures for BIOS-installed RAM code known by exact hash.
 
@@ -947,8 +980,13 @@ def bios_resident_records(bios_path=None, manifest_path=None):
         if not entries or any(entry not in code_words for entry in entries):
             raise ValueError(f'{manifest_path}: every resident dispatch entry must '
                              'name a listed code word')
+        segments=resident_entry_segments(
+            image.get('dispatch_entry_segments'), entries,
+            lambda value: number(value, 'segment dispatch entry'), manifest_path)
         record=rec(start, bytes(data), [], dispatch_extra=entries,
                    producer_ranges=producer_ranges)
+        if segments:
+            record['dispatch_entry_segments']=segments
         record['producer']='bios_resident_manifest'
         record['bios_sha256']=bios_sha
         record['producer_name']=str(image.get('name', 'BIOS resident code'))
