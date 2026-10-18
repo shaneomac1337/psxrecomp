@@ -276,6 +276,29 @@ def sector_sources(disc, spec):
     return sources
 
 
+def xor_words(body, base, item):
+    """The extent as the loader leaves it after XORing a word interval with a key.
+
+    `xor_words` = {key, start, end}: the 32-bit key and the half-open,
+    word-aligned [start, end) interval of loaded addresses the loader XORs in
+    place after the read. All three are explicit loader facts; `sha256` keeps
+    naming the stored bytes and `decoded_sha256` names the result."""
+    spec = item['xor_words']
+    key, start, end = (number(spec[name]) for name in ('key', 'start', 'end'))
+    require(base <= start < end <= base + len(body) and start % 4 == end % 4 == 0
+            and 0 <= key <= 0xFFFFFFFF, f"Invalid XOR interval: {item['file']} {start:#x}-{end:#x}")
+    require(item.get('decoded_sha256'), 'XOR-keyed extent needs decoded_sha256')
+    decoded = bytearray(body)
+    words = (end - start) // 4
+    lo = start - base
+    values = struct.unpack_from(f'<{words}I', decoded, lo)
+    struct.pack_into(f'<{words}I', decoded, lo, *(value ^ key for value in values))
+    decoded = bytes(decoded)
+    require(hashlib.sha256(decoded).hexdigest() == item['decoded_sha256'],
+            f"Decoded extent changed: {item['file']} {start:#x}")
+    return decoded
+
+
 def extent_sources(disc, spec):
     """Declared byte extents of original (or mod-package) files at load addresses."""
     sources = []
@@ -290,6 +313,8 @@ def extent_sources(disc, spec):
                 f"Extent bytes changed: {item['file']} {address:#x}")
         base = number(item['load_addr'])
         require(in_ram(base, size) and base % 4 == 0, 'Extent image outside RAM')
+        if 'xor_words' in item:
+            body = xor_words(body, base, item)
         name = f"{item['file'].upper()}@{address:08X}+{size:X}"
         sources.append(dict(name=name, base=base, body=body, spec={**spec, **item},
                             source_file=item['file'].upper(), source_offset=offset, aliases=[]))
@@ -624,9 +649,43 @@ def mod_package_views(profile, disc, project_root):
     return views
 
 
+def drop_excluded_records(profile, disc, records, sources, views=None):
+    """Generic records that only reproduce an explicitly excluded original image.
+
+    `excluded_images` uses the image methods to name original executables the
+    title accounts for but does not compile (for example a bundled demo that
+    stays on the interpreter), each with a reason. Generic discovery still
+    finds them; their records are dropped here instead of failing as
+    unconfigured. A record that also matches a compiled image is kept."""
+    excluded = []
+    for spec in profile.get('excluded_images', []):
+        require(spec.get('reason', '').strip(), 'Excluded image needs a reason')
+        produced = positioned_sources(disc, [spec], views, main_ram_bytes(profile))
+        for source in produced:
+            source['reason'] = spec['reason'].strip()
+        excluded.extend(produced)
+    compiled = {s['name'] for s in sources}
+    require(not compiled & {s['name'] for s in excluded},
+            'An image cannot be both compiled and excluded')
+    kept, dropped = [], {s['name']: 0 for s in excluded}
+    for record in records:
+        if record.get('producer') != 'bios_resident_manifest' and not match_sources(record, sources):
+            hits = match_sources(record, excluded)
+            if hits:
+                for source, _, _ in hits:
+                    dropped[source['name']] += 1
+                continue
+        kept.append(record)
+    return kept, [dict(name=s['name'], method=s['spec']['method'], reason=s['reason'],
+                       load_addr=hex(s['base']), size=len(s['body']),
+                       sha256=hashlib.sha256(s['body']).hexdigest(),
+                       dropped_records=dropped[s['name']]) for s in excluded]
+
+
 def prepare(profile, disc, records, output, views=None):
     verify_evidence(disc, profile.get('checks', []), views)
     sources = positioned_sources(disc, profile['images'], views, main_ram_bytes(profile))
+    records, excluded_images = drop_excluded_records(profile, disc, records, sources, views)
     bios = extractor.bios_resident_records() if profile.get('bios_resident') else []
     for record in records:
         if record.get('producer') == 'bios_resident_manifest':
@@ -713,6 +772,7 @@ def prepare(profile, disc, records, output, views=None):
                      original_disc_sha256=digest(disc.binary), required_images=sorted(by_name),
                      recipe_count=len(jobs), full_static_coverage_proven=False, jobs=jobs)
     inventory['mod_packages'] = [view.receipt() for view in (views or {}).values()]
+    inventory['excluded_images'] = excluded_images
     inventory['source_images'] = [dict(name=s['name'], aliases=s['aliases'],
         method=s['spec']['method'], load_addr=hex(s['base']), size=len(s['body']),
         sha256=hashlib.sha256(s['body']).hexdigest(),

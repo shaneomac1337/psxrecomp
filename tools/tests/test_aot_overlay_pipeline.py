@@ -398,6 +398,32 @@ class AotMethodsTest(unittest.TestCase):
                          [[0x80101018], [0x80102028]])
         self.assertEqual(inventory['jobs'][0]['known_ranges'], [(0x80101010, 0x80101020)])
 
+    def test_xor_keyed_extent_is_decoded_before_it_becomes_an_image(self):
+        # Invented loader: after the read it XORs the words of
+        # [0x80100008, 0x80100010) with 0x11111111. Header words stay plain.
+        plain = struct.pack('<4I', 0xAAAA0000, 0xBBBB0000, 0x03e00008, 0)
+        stored = plain[:8] + struct.pack('<2I', 0x03e00008 ^ 0x11111111, 0x11111111)
+        archive = bytes(0x20) + stored + bytes(8)
+        disc = FakeDisc({'PACK.BIN': archive})
+        extent = dict(file='PACK.BIN', address='0x20', size=16, sha256=sha(stored),
+                      load_addr='0x80100000', decoded_sha256=sha(plain),
+                      xor_words=dict(key='0x11111111', start='0x80100008', end='0x80100010'))
+        spec = dict(method='fixed_address_extents', allow_missing=True,
+                    entries=['0x80100008'], extents=[extent])
+        source, = pipeline.positioned_sources(disc, [spec])
+        self.assertEqual(source['body'], plain)
+        self.assertEqual(disc.read('PACK.BIN'), archive)
+        for change, error in ((dict(decoded_sha256='0' * 64), 'Decoded extent changed'),
+                              (dict(decoded_sha256=None), 'decoded_sha256'),
+                              (dict(xor_words=dict(key='1', start='0x80100006', end='0x80100010')),
+                               'XOR interval'),
+                              (dict(xor_words=dict(key='1', start='0x80100008', end='0x80100014')),
+                               'XOR interval')):
+            changed = {**extent, **change}
+            changed = {k: v for k, v in changed.items() if v is not None}
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, error):
+                pipeline.positioned_sources(disc, [{**spec, 'extents': [changed]}])
+
     def test_counted_sources_reject_inventory_and_callback_drift(self):
         image = struct.pack('<4I', 8, 0, 0x03e00008, 0)
         original = struct.pack('<4I', 1, 0, 16, 0) + image + struct.pack('<2I', 0, 0xffffffff)
@@ -731,6 +757,41 @@ class AotMethodsTest(unittest.TestCase):
                       spec=dict(method='fixed_address_files'))
         record = pipeline.extractor.rec(0x80100000, b'1234', [])
         self.assertEqual(pipeline.match_sources(record, [source]), [])
+
+    def test_excluded_image_accounts_for_generic_records_without_compiling_them(self):
+        # Invented disc: an area overlay the profile compiles, plus a second
+        # executable (a bundled demo) the generic extractor finds and the title
+        # deliberately leaves to the interpreter.
+        area = struct.pack('<4I', 0x27bdfff8, 0x03e00008, 0x27bd0008, 0)
+        demo_body = struct.pack('<4I', 0x03e00008, 0, 0, 0)
+        header = bytearray(0x800)
+        header[:8] = b'PS-X EXE'
+        struct.pack_into('<I', header, 0x18, 0x80010000)
+        disc = FakeDisc({'AREA.BIN': area, 'DEMO/SHELL.EXE': bytes(header) + demo_body})
+        image = dict(method='fixed_address_files', files=['AREA.BIN'], load_addr='0x80100000',
+                     allow_missing=True, entries=['0x80100000'])
+        demo = dict(method='psx_exe', files=['DEMO/SHELL.EXE'],
+                    reason='bundled demo; runs on the interpreter')
+        generic = [pipeline.extractor.rec(0x80010000, demo_body, [0x80010000])]
+        profile = dict(game_id='TEST', images=[image], excluded_images=[demo],
+                       strict_bounds=True, expected_records=1)
+        with tempfile.TemporaryDirectory() as directory:
+            disc.binary = Path(directory) / 'track.bin'
+            disc.binary.write_bytes(area)
+            inventory = pipeline.prepare(profile, disc, list(generic), Path(directory))
+            self.assertEqual(inventory['recipe_count'], 1)
+            self.assertEqual(inventory['required_images'], ['AREA.BIN'])
+            self.assertEqual([(i['name'], i['reason'], i['dropped_records'])
+                              for i in inventory['excluded_images']],
+                             [('DEMO/SHELL.EXE', 'bundled demo; runs on the interpreter', 1)])
+            for change, error in ((dict(excluded_images=[{**demo, 'reason': ''}]), 'reason'),
+                                  (dict(excluded_images=[]), 'no configured original source'),
+                                  (dict(excluded_images=[{**demo, 'files': ['AREA.BIN'],
+                                                          'method': 'fixed_address_files',
+                                                          'load_addr': '0x80100000'}]),
+                                   'both compiled and excluded')):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, error):
+                    pipeline.prepare({**profile, **change}, disc, list(generic), Path(directory))
 
     def test_stage_refuses_missing_or_changed_audited_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
