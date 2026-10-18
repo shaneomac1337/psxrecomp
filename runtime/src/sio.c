@@ -1529,7 +1529,10 @@ static void pad_process_byte(uint8_t tx_byte) {
              * responses; only valid while in config mode (a digital pad ignores
              * them, handled by the else branch below). */
             static const uint8_t r_def[8] = { 0xF3,0x5A,0x00,0x00,0x00,0x00,0x00,0x00 };
-            static const uint8_t r_45[8]  = { 0xF3,0x5A,0x03,0x02,0x01,0x02,0x01,0x00 };
+            /* 0x45: model 01 (DualShock; 03 would claim a DualShock 2), 02,
+             * analog-mode flag, 02 actuators, 01, 00 (Mednafen dualshock.cpp,
+             * DuckStation AnalogController). The mode flag is filled in below. */
+            static const uint8_t r_45[8]  = { 0xF3,0x5A,0x01,0x02,0x00,0x02,0x01,0x00 };
             static const uint8_t r_46[8]  = { 0xF3,0x5A,0x00,0x00,0x01,0x02,0x00,0x0A };
             static const uint8_t r_47[8]  = { 0xF3,0x5A,0x00,0x00,0x02,0x00,0x01,0x00 };
             static const uint8_t r_4c[8]  = { 0xF3,0x5A,0x00,0x00,0x00,0x04,0x00,0x00 };
@@ -1551,7 +1554,7 @@ static void pad_process_byte(uint8_t tx_byte) {
                         { 0xF3, 0x5A, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00 };
                     memcpy(pad_response, jogcon_45, sizeof(jogcon_45));
                 } else {
-                    pad_response[3] = pad_analog[lp] ? 0x01 : 0x00;
+                    pad_response[4] = pad_analog[lp] ? 0x01 : 0x00;
                 }
             }
             /* JogCon config commands are not the DualShock's canned tables:
@@ -1623,6 +1626,26 @@ static void pad_process_byte(uint8_t tx_byte) {
                         if (tx_byte == 0x00) pad_response[5] = 0x04;
                         else if (tx_byte == 0x01) pad_response[4] = 0x03;
                     }
+                } else if (!g_pad_legacy_cfg && pad_analog[rs] != SIO_PAD_JOGCON &&
+                           pad_response_idx == 2 &&
+                           (pad_current_cmd == 0x46 || pad_current_cmd == 0x47 ||
+                            pad_current_cmd == 0x4C)) {
+                    /* DualShock tables indexed by the first data byte (Mednafen
+                     * dualshock.cpp, DuckStation AnalogController). 0x46 offset 1
+                     * describes the second actuator and 0x4C offset 1 the second
+                     * mode; libpad reads both before it enables vibration. Any
+                     * other offset answers zeros. Bytes 2..3 are already zero. */
+                    static const uint8_t z[4] = { 0x00, 0x00, 0x00, 0x00 };
+                    static const uint8_t t46[2][4] = { { 0x01, 0x02, 0x00, 0x0A },
+                                                       { 0x01, 0x01, 0x01, 0x14 } };
+                    static const uint8_t t47[4] = { 0x02, 0x00, 0x01, 0x00 };
+                    static const uint8_t t4c[2][4] = { { 0x00, 0x04, 0x00, 0x00 },
+                                                       { 0x00, 0x07, 0x00, 0x00 } };
+                    const uint8_t *tail = z;
+                    if (pad_current_cmd == 0x46 && tx_byte < 2) tail = t46[tx_byte];
+                    else if (pad_current_cmd == 0x47 && tx_byte == 0) tail = t47;
+                    else if (pad_current_cmd == 0x4C && tx_byte < 2) tail = t4c[tx_byte];
+                    memcpy(&pad_response[4], tail, 4);
                 }
                 /* The six data bytes after 0x42's leading 0x00 occupy response
                  * indexes 2..7. Route each through the map negotiated by 0x4D. */

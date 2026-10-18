@@ -118,6 +118,45 @@ static void exit_config(int slot) {
     finish_six_data_bytes(slot, 1);
 }
 
+/* One config query (0x45/0x46/0x47/0x4C) with `offset` as its first data
+ * byte; checks the six data bytes against a real DualShock's answer. */
+static void expect_query(int slot, const char *label, uint8_t cmd,
+                         uint8_t offset, const uint8_t expected[6]) {
+    EXPECT(label, 0xFF, xchg(slot, 0x01));
+    EXPECT(label, 0xF3, xchg(slot, cmd));
+    EXPECT(label, 0x5A, xchg(slot, 0x00));
+    for (int i = 0; i < 6; i++) {
+        const uint8_t rx = xchg(slot, i == 0 ? offset : 0x00);
+        if (rx != expected[i]) {
+            fprintf(stderr, "FAIL %s byte %d: expected=0x%02X actual=0x%02X\n",
+                    label, i, expected[i], rx);
+            failures++;
+        }
+    }
+}
+
+/* libpad (Spyro 3, PadInfoAct/PadSetActAlign) reads the model, both
+ * actuator descriptors and both mode IDs before it sends 0x4D. Values from
+ * Mednafen dualshock.cpp and DuckStation AnalogController. */
+static void check_config_queries(int slot) {
+    static const uint8_t q45_analog[6] = { 0x01, 0x02, 0x01, 0x02, 0x01, 0x00 };
+    static const uint8_t q46_0[6] = { 0x00, 0x00, 0x01, 0x02, 0x00, 0x0A };
+    static const uint8_t q46_1[6] = { 0x00, 0x00, 0x01, 0x01, 0x01, 0x14 };
+    static const uint8_t q47_0[6] = { 0x00, 0x00, 0x02, 0x00, 0x01, 0x00 };
+    static const uint8_t q4c_0[6] = { 0x00, 0x00, 0x00, 0x04, 0x00, 0x00 };
+    static const uint8_t q4c_1[6] = { 0x00, 0x00, 0x00, 0x07, 0x00, 0x00 };
+    static const uint8_t zero[6]  = { 0, 0, 0, 0, 0, 0 };
+    expect_query(slot, "q45.analog", 0x45, 0x00, q45_analog);
+    expect_query(slot, "q46.0", 0x46, 0x00, q46_0);
+    expect_query(slot, "q46.1", 0x46, 0x01, q46_1);
+    expect_query(slot, "q46.2", 0x46, 0x02, zero);
+    expect_query(slot, "q47.0", 0x47, 0x00, q47_0);
+    expect_query(slot, "q47.1", 0x47, 0x01, zero);
+    expect_query(slot, "q4c.0", 0x4C, 0x00, q4c_0);
+    expect_query(slot, "q4c.1", 0x4C, 0x01, q4c_1);
+    expect_query(slot, "q4c.2", 0x4C, 0x02, zero);
+}
+
 static void poll_with_motors(int slot, uint8_t small, uint8_t large) {
     EXPECT("poll.prefix", 0xFF, xchg(slot, 0x01));
     EXPECT("poll.id", 0x73, xchg(slot, 0x42));
@@ -142,6 +181,7 @@ int main(void) {
     sio_set_pad_config_capable(0, 1);
 
     enter_config(0);
+    check_config_queries(0);
     set_rumble_map(0, standard, unassigned);
     set_rumble_map(0, standard, standard);
     exit_config(0);
