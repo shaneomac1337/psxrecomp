@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <array>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1502,7 +1503,17 @@ struct GameConfig {
     // [quality.low/medium/high/ultra] -- graphics presets, lowest first. Empty:
     // the title has no presets and [video] alone applies (unchanged).
     std::vector<QualityPreset> quality_presets;
+    // [recompiler] symbols -- optional path to the game's symbols.toml. Its
+    // [[func]] names label generated bodies and the runtime name table
+    // (docs/SYMBOLS.md). Empty: no names.
+    std::filesystem::path symbols_path;
 };
+
+// Guest function names from a symbols.toml: every [[func]] with a pc and a C
+// identifier name, except entries carrying an `overlay` key (overlays share
+// guest addresses, so their names are not keyed by pc alone). Throws on a
+// malformed entry or on two names for one pc.
+std::map<uint32_t, std::string> load_function_names(const std::filesystem::path& path);
 
 // Effective clip_edge_width: explicit value, else screen_w_imms[0], else 320.
 inline uint32_t ws_cull_clip_edge_width(const GameConfig& c) {

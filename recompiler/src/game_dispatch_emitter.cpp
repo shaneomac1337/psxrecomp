@@ -321,6 +321,39 @@ bool emit_game_dispatch(const std::vector<GameDispatchUnit>& units,
     ds << "    return psx_game_find_entry(addr) != 0;\n";
     ds << "}\n";
 
+    // Guest function names ([recompiler] symbols). Each row spans a named
+    // entry up to the next compiled entry, so a PC inside the body resolves to
+    // the name plus an offset. Registered before main() so runtime telemetry
+    // can name game code (runtime/src/psx_game_symbols.c).
+    const auto& names = units.front().codegen->config().function_names;
+    if (!names.empty()) {
+        std::set<uint32_t> starts;
+        for (const auto& unit : units)
+            for (uint32_t addr : unit.dispatch_addrs) starts.insert(addr & 0x1FFFFFFFu);
+        ds << "\n/* Guest function names from symbols.toml: {lo, hi, name}, physical, sorted. */\n";
+        ds << "#include \"psx_game_symbols.h\"\n";
+        ds << "static const PsxGameSymbol k_psx_game_symbols[] = {\n";
+        size_t rows = 0;
+        for (const auto& [pc, name] : names) {
+            const uint32_t lo = pc & 0x1FFFFFFFu;
+            const auto next = starts.upper_bound(lo);
+            const uint32_t hi = next != starts.end() ? *next : game_text_end;
+            if (hi <= lo) continue;
+            ds << fmt::format("    {{0x{:08X}u, 0x{:08X}u, \"{}\"}},\n", lo, hi, name);
+            rows++;
+        }
+        ds << "};\n";
+        ds << "static void psx_game_symbols_init(void) {\n";
+        ds << fmt::format("    psx_game_symbols_register(k_psx_game_symbols, {}u);\n", rows);
+        ds << "}\n";
+        ds << "#if defined(_MSC_VER)\n";
+        ds << "#pragma section(\".CRT$XCU\", read)\n";
+        ds << "__declspec(allocate(\".CRT$XCU\")) static void (*psx_game_symbols_ctor)(void) = psx_game_symbols_init;\n";
+        ds << "#else\n";
+        ds << "__attribute__((constructor)) static void psx_game_symbols_ctor(void) { psx_game_symbols_init(); }\n";
+        ds << "#endif\n";
+    }
+
     if (cps) {
         // RECURSION_BUG.md §25 — mark CPS mode at startup so runtime code that
         // routes CPS continuations (overlay_loader.c) sees the contract.

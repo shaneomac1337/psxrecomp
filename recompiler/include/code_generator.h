@@ -68,6 +68,13 @@ struct CodeGenConfig {
     std::set<uint32_t> mod_function_entry_funcs;
     std::set<uint32_t> mod_instruction_sites;
 
+    // [recompiler] symbols: guest function names from the game's symbols.toml
+    // ([[func]] pc/name). A named body gets a `/* Name */` label, and the game
+    // dispatch file registers a pc -> name table that runtime logs use. The C
+    // symbol stays func_XXXXXXXX, so dispatch and overlay ABIs are unchanged.
+    // Empty = no names (default).
+    std::map<uint32_t, std::string> function_names;
+
     // [recompiler] hot_funcs: emit __attribute__((hot)) on these guest
     // addresses (MotK VLC leaves, etc.). Host locality hint only.
     std::set<uint32_t> hot_funcs;
@@ -451,6 +458,7 @@ private:
 
 public:
     bool cps_enabled() const { return cps_enabled_; }
+    const CodeGenConfig& config() const { return config_; }
     // continuation_addr -> owning function entry (CPS dispatch routing).
     const std::map<uint32_t, uint32_t>& cps_continuations() const {
         return cps_continuation_owner_;

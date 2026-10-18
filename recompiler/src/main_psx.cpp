@@ -272,6 +272,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     std::filesystem::path out_dir = "generated";
     uint32_t              configured_text_size = 0;
     std::filesystem::path bios_profile_path;   // [recompiler] bios_config
+    std::map<uint32_t, std::string> function_names;   // [recompiler] symbols
 
     if (!config_path.empty()) {
         const auto cfg = PSXRecompV4::load_game_config(config_path);
@@ -281,6 +282,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
         extra_funcs_storage  = cfg.seeds_path.string();
         extra_funcs_path     = extra_funcs_storage.c_str();
         bios_profile_path    = cfg.bios_config_path;
+        if (!cfg.symbols_path.empty())
+            function_names = PSXRecompV4::load_function_names(cfg.symbols_path);
         out_dir              = cfg.out_dir;
         instruction_patches  = cfg.recompiler_patches;
         ws_tag_funcs.insert(cfg.ws_sprite_tag_funcs.begin(),
@@ -1472,6 +1475,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
     codegen_config.ws_sprite_tag_funcs = ws_tag_funcs;
     codegen_config.data_shard_funcs = ds_funcs;
     codegen_config.mod_function_entry_funcs = mod_entry_funcs;
+    // Names are keyed by EXE pc; overlay images share guest addresses.
+    if (!overlay_mode) codegen_config.function_names = function_names;
     codegen_config.ws_cull_masked_reject_sites = ws_cull_masked_reject;
     codegen_config.mod_instruction_sites = mod_instruction_sites;
     codegen_config.hot_funcs = hot_funcs;

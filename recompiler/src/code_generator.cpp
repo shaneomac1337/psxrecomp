@@ -2910,6 +2910,9 @@ GeneratedFunction CodeGenerator::generate_function(
     result.function_name = func.name;
     {
         std::string sig;
+        const auto named = config_.function_names.find(func.start_addr);
+        if (named != config_.function_names.end())
+            sig += fmt::format("/* {} */\n", named->second);
         if (config_.hot_funcs.count(func.start_addr)) {
             sig += "#if defined(__GNUC__) || defined(__clang__)\n"
                    "__attribute__((hot))\n"

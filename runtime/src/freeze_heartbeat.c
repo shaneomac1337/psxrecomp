@@ -8,6 +8,7 @@
 #include "crash_trace.h"   /* g_psx_fatal_reason */
 #include "cpu_state.h"     /* g_psx_bail_* call-contract counters */
 #include "starvation_ring.h"
+#include "psx_game_symbols.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -24,6 +25,7 @@
 extern uint64_t s_frame_count;                 /* debug_server.c */
 extern uint32_t g_debug_current_func_addr;     /* debug_server.c */
 extern uint32_t g_debug_last_store_pc;         /* debug_server.c */
+extern volatile uint32_t g_psx_last_fn_entry;   /* debug_server.c */
 extern uint32_t i_stat;                        /* memory.c */
 extern uint32_t i_mask;                        /* memory.c */
 
@@ -1051,6 +1053,22 @@ static void heartbeat_write(void) {
     if (n > 0 && buf[n - 1] == '\n') n--;     /* drop trailing newline */
     if (n > 0 && buf[n - 1] == '}')  n--;     /* drop closing brace */
     if (n > 0 && buf[n - 1] == '\n') n--;     /* and any preceding newline */
+
+    /* Guest function names ([recompiler] symbols): the last compiled function
+     * entered and the dispatch stamp, named when symbols.toml names them. */
+    {
+        const uint32_t last_fn = g_psx_last_fn_entry;
+        const char *last_name = psx_game_symbol_lookup(last_fn, NULL);
+        const char *cur_name = psx_game_symbol_lookup(cur_fn, NULL);
+        int s = snprintf(buf + n, sizeof(buf) - (size_t)n,
+            ",\n  \"last_fn_entry\":\"0x%08X\",\n"
+            "  \"last_fn_entry_name\":%s%s%s,\n"
+            "  \"current_func_name\":%s%s%s",
+            last_fn,
+            last_name ? "\"" : "", last_name ? last_name : "null", last_name ? "\"" : "",
+            cur_name ? "\"" : "", cur_name ? cur_name : "null", cur_name ? "\"" : "");
+        if (s > 0 && s < (int)(sizeof(buf) - (size_t)n)) n += s;
+    }
 
     int m = snprintf(buf + n, sizeof(buf) - (size_t)n, ",\n  \"ring\":[\n");
     if (m > 0) n += m;

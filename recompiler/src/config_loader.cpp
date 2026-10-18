@@ -2876,7 +2876,49 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     loaded.draw_distance_clamp_sites =
         parse_draw_distance_clamps(cfg, config_path);
     loaded.quality_presets = parse_quality_presets(cfg, root, config_path);
+    if (recomp.contains("symbols")) {
+        loaded.symbols_path =
+            PSXRecompV4::host_resolve(root, toml::find<std::string>(recomp, "symbols"));
+    }
     return loaded;
+}
+
+std::map<uint32_t, std::string> load_function_names(const fs::path& path) {
+    toml::value doc;
+    try {
+        doc = toml::parse(path);
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(
+            fmt::format("symbols file {}: {}", path.string(), ex.what()));
+    }
+    std::map<uint32_t, std::string> names;
+    if (!doc.contains("func")) return names;
+    for (const auto& entry : toml::find<toml::array>(doc, "func")) {
+        if (!entry.is_table() || entry.contains("overlay")) continue;
+        if (!entry.contains("pc") || !entry.contains("name")) {
+            throw std::runtime_error(
+                fmt::format("symbols file {}: [[func]] needs pc and name", path.string()));
+        }
+        const toml::value& pcv = toml::find(entry, "pc");
+        const uint32_t pc = pcv.is_integer()
+            ? static_cast<uint32_t>(pcv.as_integer())
+            : static_cast<uint32_t>(std::stoul(pcv.as_string(), nullptr, 0));
+        const std::string name = toml::find<std::string>(entry, "name");
+        bool ident = !name.empty() && !std::isdigit(static_cast<unsigned char>(name[0]));
+        for (char ch : name)
+            ident = ident && (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_');
+        if (!ident) {
+            throw std::runtime_error(fmt::format(
+                "symbols file {}: name '{}' is not a C identifier", path.string(), name));
+        }
+        const auto [it, inserted] = names.emplace(pc, name);
+        if (!inserted && it->second != name) {
+            throw std::runtime_error(fmt::format(
+                "symbols file {}: pc 0x{:08X} named both '{}' and '{}'",
+                path.string(), pc, it->second, name));
+        }
+    }
+    return names;
 }
 
 // ---- GameOptions (game_options.toml) — the game's own native settings ----

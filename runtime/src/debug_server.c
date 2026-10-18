@@ -3308,6 +3308,7 @@ static void handle_dirty_insn_dump_file(int id, const char *json)
 #include "psx_bios_image.h"
 #include "parity_trace.h"
 #include "device_trace.h"
+#include "psx_game_symbols.h"
 
 /* ---- parity_dump / parity_ctl: general two-process control-flow parity ring.
  * Mirrors the IDENTICAL command on psx-beetle so tools/parity_diff.py can pull
@@ -15312,6 +15313,27 @@ void debug_server_freeze_dump_dirty_block_json(FILE *f, uint32_t max_count)
 typedef void (*CmdHandler)(int id, const char *json);
 typedef struct { const char *name; CmdHandler handler; } CmdEntry;
 
+/* symbolize addr=<hex>: the game function containing addr, from the
+ * symbols.toml name table ([recompiler] symbols; psx_game_symbols.h).
+ * Reply carries name+offset, or name:null when the address is unnamed. */
+static void handle_symbolize(int id, const char *json)
+{
+    char buf[32];
+    if (!json_get_str(json, "addr", buf, sizeof(buf))) {
+        send_err(id, "symbolize: need addr");
+        return;
+    }
+    const uint32_t addr = hex_to_u32(buf);
+    uint32_t offset = 0;
+    const char *name = psx_game_symbol_lookup(addr, &offset);
+    if (name)
+        send_fmt("{\"id\":%d,\"ok\":true,\"addr\":\"0x%08X\",\"name\":\"%s\",\"offset\":\"0x%X\",\"symbols\":%u}",
+                 id, addr, name, offset, psx_game_symbol_count());
+    else
+        send_fmt("{\"id\":%d,\"ok\":true,\"addr\":\"0x%08X\",\"name\":null,\"symbols\":%u}",
+                 id, addr, psx_game_symbol_count());
+}
+
 static void handle_game_options(int id, const char *json)
 {
     (void)json;
@@ -16139,6 +16161,7 @@ static const CmdEntry s_commands[] = {
     { "wtrace_trans_dump",   handle_wtrace_trans_dump },
     { "wtrace_trans_stats",  handle_wtrace_trans_stats },
     { "wtrace_trans_reset",  handle_wtrace_trans_reset },
+    { "symbolize",           handle_symbolize },
     { "call_focus_dump",     handle_call_focus_dump },
     { "call_focus_stats",    handle_call_focus_stats },
     { "call_focus_reset",    handle_call_focus_reset },

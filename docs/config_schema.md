@@ -158,6 +158,9 @@ keys are written only for multi-disc titles.
 seeds       = "recompiler/seeds/phase2_ghidra_seeds.json"  # BIOS
 seeds       = "seeds/ghidra_funcs.txt"                     # game (note: game seeds aren't json today)
 bios_thunks = "seeds/tomba_bios_thunks.txt"                # game-only
+symbols     = "symbols.toml"                               # game-only, optional: [[func]] names label
+                                                           # generated bodies and runtime telemetry
+                                                           # (docs/SYMBOLS.md)
 bios_config = "psxrecomp/bios/SCPH1001.toml"               # game-only: BIOS profile whose address
                                                            # model game codegen folds RAM aliases
                                                            # through (see "BIOS profiles" below);
