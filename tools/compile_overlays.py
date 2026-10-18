@@ -522,11 +522,12 @@ def capture_segment_views(cap: dict,
                       'static_call_continuation_pcs'):
             if field in cap:
                 view[field] = respell_list(cap[field], seg)
-        if cap.get('producer_ranges'):
-            view['producer_ranges'] = [
-                dict(r, start=f'0x{_respell(_parse_addr(r["start"]), seg):08X}',
-                     end=f'0x{_respell(_parse_addr(r["end"]), seg):08X}')
-                for r in cap['producer_ranges']]
+        for field in ('producer_ranges', 'table_ranges'):
+            if cap.get(field):
+                view[field] = [
+                    dict(r, start=f'0x{_respell(_parse_addr(r["start"]), seg):08X}',
+                         end=f'0x{_respell(_parse_addr(r["end"]), seg):08X}')
+                    for r in cap[field]]
         if cap.get('static_alias_ranges'):
             view['static_alias_ranges'] = [
                 dict(r, entry=f'0x{_respell(_parse_addr(r["entry"]), seg):08X}',
@@ -1150,8 +1151,14 @@ def _classify_cf(pc: int, word: int) -> tuple[str, int]:
 def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
                              entry: int, hard_cap: int,
                              jr_pc: int, jr_rs: int,
-                             producer_range=None, proof_out=None) -> set[int]:
+                             producer_range=None, proof_out=None,
+                             table_ranges=()) -> set[int]:
     """Resolve one tightly bounded canonical ``sltiu``/``jr`` switch.
+
+    The table itself must lie in the entry's producer range, or in one of
+    ``table_ranges``: intervals of the same image whose bytes a producer has
+    verified as original data (a compiler's .rodata, where switch tables
+    normally live). Every target must still lie in the producer range.
 
     This is deliberately a structural reaching-definition proof, not the old
     40-word bag-of-opcodes backscan.  The accepted suffix is::
@@ -1207,13 +1214,26 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
     addu_inputs = ((addu_word >> 21) & 0x1F,
                    (addu_word >> 16) & 0x1F)
 
+    def is_scale_by_4(word):
+        return (word is not None and ((word >> 26) & 0x3F) == 0 and
+                (word & 0x3F) == 0 and ((word >> 21) & 0x1F) == 0 and
+                ((word >> 6) & 0x1F) == 2)
+
     sll_pc = addu_pc - 4
     sll_word = _word_at(data, load_addr, sll_pc)
-    if sll_word is None or ((sll_word >> 26) & 0x3F) != 0 \
-            or (sll_word & 0x3F) != 0 \
-            or ((sll_word >> 21) & 0x1F) != 0 \
-            or ((sll_word >> 6) & 0x1F) != 2:
-        return set()
+    # Psy-Q's GCC schedules the scale into the bound's delay slot and the
+    # table's LUI between it and the ADDU:
+    #   sltiu guard,index,count; beq guard,zero,reject; sll scaled,index,2
+    #   lui base,hi(table); addu address,base,scaled; lw target,lo(table)(address)
+    #   nop; jr target
+    # The SLL also runs on the reject path, which only ever clobbers a dead
+    # temporary there; the LUI is the table's sole definition.
+    delay_scaled = not is_scale_by_4(sll_word)
+    if delay_scaled:
+        sll_pc = addu_pc - 8
+        sll_word = _word_at(data, load_addr, sll_pc)
+        if not is_scale_by_4(sll_word):
+            return set()
     scaled_reg = (sll_word >> 11) & 0x1F
     index_reg = (sll_word >> 16) & 0x1F
     if not scaled_reg or not index_reg or scaled_reg not in addu_inputs:
@@ -1225,7 +1245,16 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
     # The bound must guard this exact index on the sole fallthrough into SLL.
     sltiu_pc = sll_pc - 12
     branch_pc = sll_pc - 8
-    scheduled_base = _word_at(data, load_addr, sll_pc - 4) != 0
+    scheduled_base = False if delay_scaled else _word_at(data, load_addr, sll_pc - 4) != 0
+    if delay_scaled:
+        sltiu_pc = sll_pc - 8
+        branch_pc = sll_pc - 4
+        lui_word = _word_at(data, load_addr, addu_pc - 4)
+        # R3000 load delay: JR must not consume the immediately preceding LW.
+        if (lw_pc != jr_pc - 8 or lui_word is None or (lui_word >> 26) != 0x0F or
+                ((lui_word >> 21) & 31) != 0 or ((lui_word >> 16) & 31) != table_reg or
+                index_reg == table_reg):
+            return set()
     if scheduled_base:
         # R3000 load delay: JR must not consume the immediately preceding LW.
         if lw_pc != jr_pc - 8:
@@ -1259,10 +1288,13 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
     branch_rt = (branch_word >> 16) & 0x1F
     if {branch_rs, branch_rt} != {0, guard_reg}:
         return set()
+    # Shapes that put instructions of the suffix ahead of SLL protect it
+    # from SLTIU onward rather than from the table constant.
+    guarded = scheduled_base or delay_scaled
     reject_target = _branch_target(branch_pc, branch_word)
     if (not (entry <= reject_target < hard_cap) or
             sll_pc <= reject_target < jr_pc + 8 or
-            (scheduled_base and sltiu_pc < reject_target < jr_pc + 8)):
+            (guarded and sltiu_pc < reject_target < jr_pc + 8)):
         return set()
 
     def nearest_writer(reg: int, before: int):
@@ -1320,7 +1352,10 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
     table_base = (table_base + lw_offset) & 0xFFFFFFFF
     table_end = table_base + table_count * 4
     range_lo, range_hi = producer_range or (lo, hi)
-    if (table_base & 3) or not (range_lo <= table_base < table_end <= range_hi):
+    table_homes = [(range_lo, range_hi)] + [
+        (max(t_lo, lo), min(t_hi, hi)) for t_lo, t_hi in table_ranges]
+    if (table_base & 3) or not any(home_lo <= table_base < table_end <= home_hi
+                                   for home_lo, home_hi in table_homes):
         return set()
 
     targets = set()
@@ -1328,7 +1363,7 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
         target = _word_at(data, load_addr, table_base + index * 4)
         if (target is None or (target & 3) or
                 not (entry <= target < hard_cap) or
-                (scheduled_base and sltiu_pc < target < jr_pc + 8) or
+                (guarded and sltiu_pc < target < jr_pc + 8) or
                 not (range_lo <= target < range_hi) or
                 not _is_valid_mips_word(_word_at(data, load_addr, target))):
             return set()
@@ -1370,7 +1405,7 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
         elif kind in ('jr', 'jr_ra'):
             case_reachable.add(delay)
 
-    protected_pc = sltiu_pc if scheduled_base else constant_pc
+    protected_pc = sltiu_pc if guarded else constant_pc
     for source in range(entry, hard_cap, 4):
         source_word = _word_at(data, load_addr, source)
         if source_word is None:
@@ -1379,7 +1414,7 @@ def _find_jump_table_targets(data: bytes, load_addr: int, size: int,
         if (kind in ('branch', 'j', 'jal') and
                 protected_pc < target <= jr_pc and
                 not (protected_pc <= source <= jr_pc) and
-                (scheduled_base or source not in case_reachable)):
+                (guarded or source not in case_reachable)):
             return set()
     if proof_out is not None:
         proof_out.append({
@@ -1617,7 +1652,8 @@ def _frameless_dispatch_root_proven(data: bytes, load_addr: int, size: int,
 def _walk_overlay_function(data: bytes, load_addr: int, size: int,
                            entry: int, hard_cap: int,
                            producer_ranges=(),
-                           allow_cross_producer_calls=True) -> dict:
+                           allow_cross_producer_calls=True,
+                           table_ranges=()) -> dict:
     lo = load_addr
     hi = load_addr + size
 
@@ -1765,7 +1801,8 @@ def _walk_overlay_function(data: bytes, load_addr: int, size: int,
                 proofs = []
                 for jt in _find_jump_table_targets(data, load_addr, size,
                                                    entry, hard_cap, pc, jr_rs,
-                                                   entry_producer, proofs):
+                                                   entry_producer, proofs,
+                                                   table_ranges):
                     jump_table_targets.add(jt)
                     branch_targets.add(jt)
                     if in_function(jt):
@@ -1864,6 +1901,22 @@ def classify_overlay_seeds(cap: dict, data: bytes, load_addr: int, size: int,
            for i in range(1, len(producer_ranges))):
         raise RuntimeError('producer_ranges overlap')
 
+    # Verified original data of this image (for example .rodata) that may hold
+    # switch tables for code in the producer ranges; never code itself.
+    table_ranges = []
+    for raw_range in cap.get('table_ranges', []) or []:
+        try:
+            range_lo = _parse_addr(raw_range['start'])
+            range_hi = _parse_addr(raw_range['end'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f'invalid table_ranges entry: {raw_range}') from exc
+        if not (lo <= range_lo < range_hi <= hi) or any(
+                range_lo < p_hi and p_lo < range_hi for p_lo, p_hi in producer_ranges):
+            raise RuntimeError(
+                f'table range 0x{range_lo:08X}..0x{range_hi:08X} is outside '
+                f'capture 0x{lo:08X}..0x{hi:08X} or overlaps a producer range')
+        table_ranges.append((range_lo, range_hi))
+
     def capture_producer_for(addr: int):
         for producer_lo, producer_hi in producer_ranges:
             if producer_lo <= addr < producer_hi:
@@ -1950,7 +2003,7 @@ def classify_overlay_seeds(cap: dict, data: bytes, load_addr: int, size: int,
         hard_cap = pre_roots_sorted[i + 1] if i + 1 < len(pre_roots_sorted) else hi
         walk = _walk_overlay_function(
             data, load_addr, size, entry, hard_cap, producer_ranges,
-            allow_cross_producer_calls)
+            allow_cross_producer_calls, table_ranges)
         jump_table_targets.update(walk['jump_table_targets'])
 
     def impossible_entry_start(addr: int) -> bool:
@@ -2126,7 +2179,7 @@ def classify_overlay_seeds(cap: dict, data: bytes, load_addr: int, size: int,
                             if index + 1 < len(sorted_known) else hi)
                 walk = _walk_overlay_function(
                     data, load_addr, size, entry, hard_cap, producer_ranges,
-                    allow_cross_producer_calls)
+                    allow_cross_producer_calls, table_ranges)
                 round_branch_targets.update(walk['branch_targets'])
                 round_branch_targets.update(walk['jump_table_targets'])
                 for target in walk['direct_jals']:
@@ -2177,7 +2230,7 @@ def classify_overlay_seeds(cap: dict, data: bytes, load_addr: int, size: int,
                 hard_cap = roots[index + 1] if index + 1 < len(roots) else hi
                 owner_walk = _walk_overlay_function(
                     data, load_addr, size, owner, hard_cap, producer_ranges,
-                    allow_cross_producer_calls)
+                    allow_cross_producer_calls, table_ranges)
                 if target in owner_walk['visited']:
                     normalized.remove(target)
                     roots.pop(index)
@@ -2201,7 +2254,7 @@ def classify_overlay_seeds(cap: dict, data: bytes, load_addr: int, size: int,
             hard_cap = sorted_known[i + 1] if i + 1 < len(sorted_known) else hi
             walk = _walk_overlay_function(
                 data, load_addr, size, entry, hard_cap, producer_ranges,
-                allow_cross_producer_calls)
+                allow_cross_producer_calls, table_ranges)
             covered |= walk['visited']
         promoted = sorted(a for a, r in included.items()
                           if r == 'DISPATCH_INTERIOR' and a not in covered
@@ -2228,7 +2281,7 @@ def classify_overlay_seeds(cap: dict, data: bytes, load_addr: int, size: int,
         hard_cap = sorted_known[i + 1] if i + 1 < len(sorted_known) else hi
         walk = _walk_overlay_function(
             data, load_addr, size, entry, hard_cap, producer_ranges,
-            allow_cross_producer_calls)
+            allow_cross_producer_calls, table_ranges)
         all_branch_targets.update(walk['branch_targets'])
         all_branch_targets.update(walk['jump_table_targets'])
         all_branch_targets.update(walk['forward_branch_targets'])

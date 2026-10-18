@@ -545,6 +545,45 @@ class AotMethodsTest(unittest.TestCase):
             pipeline.eligible_ranges({**source, 'spec': dict(excluded_ranges=[item, item])},
                                      0x1000, 0x1020)
 
+    def test_switch_cases_with_a_table_in_verified_data_are_dispatch_entries(self):
+        # Psy-Q GCC: sltiu/beq with the scale in its delay slot, lui/addu/lw,
+        # and the table in .rodata, which the profile excludes from native
+        # ownership (verified bytes, never code). A computed jump re-enters
+        # its host through the dispatcher at the case label, so every case is
+        # declared as a static dispatch entry, not only those that happen to
+        # be block leaders anyway.
+        base = 0x80100000
+        words = [0x27BDFFE0, 0xAFBF0018, 0x24030000, 0, 0x2C620004, 0x10400011,  # beq -> 0x8C
+                 0x00031080, 0x3C018010, 0x00220821, 0x8C220200, 0, 0x00400008, 0,
+                 0,                                     # 0x64
+                 0x24020001, 0x10000008, 0,             # 0x68 case 0: v0 = 1; b 0x90
+                 0x24020002, 0x10000005, 0,             # 0x74 case 1
+                 0x24020003, 0x10000002, 0,             # 0x80 case 2
+                 0x24020000,                            # 0x8C reject: v0 = 0
+                 0x8FBF0018, 0x03E00008, 0x27BD0020]    # 0x90 epilogue
+        body = bytearray(0x300)
+        struct.pack_into(f'<{len(words)}I', body, 0x30, *words)
+        cases = [base + 0x68, base + 0x74, base + 0x80]
+        struct.pack_into('<4I', body, 0x200, *cases, base + 0x68)
+        body = bytes(body)
+        rodata = dict(start=hex(base + 0x100), end=hex(base + 0x300), reason='rodata (synthetic)',
+                      sha256=hashlib.sha256(body[0x100:]).hexdigest())
+        spec = dict(method='fixed_address_files', files=['CODE'], load_addr=hex(base),
+                    allow_missing=True, entries=[hex(base + 0x30)], excluded_ranges=[rodata])
+        with tempfile.TemporaryDirectory() as directory:
+            disc = FakeDisc({'CODE': body})
+            disc.binary = Path(directory) / 'source.bin'
+            disc.binary.write_bytes(body)
+            inventory = pipeline.prepare(dict(game_id='TEST', images=[spec], strict_bounds=True,
+                                              expected_records=1), disc, [], Path(directory))
+            record = json.loads(Path(inventory['jobs'][0]['input']).read_text())[0]
+        self.assertEqual(record['table_ranges'], [dict(start=hex(base + 0x100), end=hex(base + 0x300))])
+        dispatch = {int(pc, 16) for pc in record['dispatch_entry_pcs']}
+        static = {int(pc, 16) for pc in record['static_dispatch_entry_pcs']}
+        self.assertTrue(set(cases) <= dispatch and set(cases) <= static, record)
+        [proof] = record['static_jump_table_proofs']
+        self.assertEqual((int(proof['table_base'], 16), proof['count']), (base + 0x200, 4))
+
     def test_fallback_cannot_hide_required_loader_entry(self):
         base, body = 0x80100000, struct.pack('<4I', 0x03e00008, 0, 0x03e00008, 0)
         spec = dict(method='fixed_address_files', files=['CODE'], load_addr=hex(base),

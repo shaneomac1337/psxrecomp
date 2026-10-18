@@ -90,6 +90,75 @@ def make_bounded_switch():
     return data, entry, table, set(cases), LOAD + 0x90
 
 
+def make_psyq_rodata_switch():
+    """Psy-Q GCC shape: scale in the bound's delay slot, LUI between SLL and
+    ADDU, and the table in .rodata outside the code's producer range."""
+    data = bytearray(0x300)
+    entry = LOAD + 0x30
+    cases = (LOAD + 0x68, LOAD + 0x70, LOAD + 0x78, LOAD + 0x68)
+    put(data, 0x30, 0x27BDFFE0)  # addiu sp,sp,-0x20
+    put(data, 0x34, 0xAFBF0018)  # sw ra,0x18(sp)
+    put(data, 0x38, 0x24030000)  # addiu v1,zero,0
+    put(data, 0x3C, 0x00000000)
+    put(data, 0x40, 0x2C620004)  # sltiu v0,v1,4
+    put(data, 0x44, 0x1040000E)  # beq v0,zero,0x80 (reject)
+    put(data, 0x48, 0x00031080)  # sll v0,v1,2 (delay slot)
+    put(data, 0x4C, 0x3C018001)  # lui at,0x8001
+    put(data, 0x50, 0x00220821)  # addu at,at,v0
+    put(data, 0x54, 0x8C220200)  # lw v0,0x200(at)
+    put(data, 0x58, 0x00000000)
+    put(data, 0x5C, 0x00400008)  # jr v0
+    put(data, 0x60, 0x00000000)
+    for case in (0x68, 0x70, 0x78, 0x80):
+        put(data, case, 0x03E00008)
+    for index, target in enumerate(cases):
+        put(data, 0x200 + index * 4, target)
+    return data, entry, set(cases)
+
+
+def check_psyq_rodata_jump_table_discovery():
+    data, entry, cases = make_psyq_rodata_switch()
+    code = (LOAD, LOAD + 0x100)
+    rodata = ((LOAD + 0x200, LOAD + 0x300),)
+
+    def find(image, table_ranges=rodata):
+        return MOD._find_jump_table_targets(
+            bytes(image), LOAD, len(image), entry, LOAD + 0x100,
+            LOAD + 0x5C, 2, code, None, table_ranges)
+
+    assert find(data) == cases
+    # The table is only trusted in verified data the producer names.
+    assert find(data, ()) == set()
+    # A case may not enter the suffix past the bound (here: at the LUI).
+    into_suffix = bytearray(data)
+    put(into_suffix, 0x68, 0x1000FFF8)  # b 0x4C
+    assert find(into_suffix) == set()
+    # The word after the scale must be the table's sole definition.
+    not_the_table = bytearray(data)
+    put(not_the_table, 0x4C, 0x3C048001)  # lui a0 (not the ADDU's base)
+    assert find(not_the_table) == set()
+    # Without the load-delay NOP the JR would consume a stale target.
+    no_delay = bytearray(data)
+    put(no_delay, 0x58, 0x00400008)
+    assert MOD._find_jump_table_targets(
+        bytes(no_delay), LOAD, len(data), entry, LOAD + 0x100,
+        LOAD + 0x58, 2, code, None, rodata) == set()
+    walk = MOD._walk_overlay_function(
+        bytes(data), LOAD, len(data), entry, LOAD + 0x100, (code,), False, rodata)
+    assert walk['jump_table_targets'] == cases
+
+
+def check_table_ranges_follow_the_segment_view():
+    cap = {'load_addr': '0x80010000', 'size': 0x300,
+           'dispatch_entry_pcs': ['0x80010030'],
+           'dispatch_entry_segments': {'kuseg': ['0x00010030']},
+           'producer_ranges': [{'start': '0x80010000', 'end': '0x80010100'}],
+           'table_ranges': [{'start': '0x80010200', 'end': '0x80010300'}]}
+    [view] = MOD.capture_segment_views(cap)
+    assert view['load_addr'] == '0x00010000'
+    assert view['table_ranges'] == [{'start': '0x00010200', 'end': '0x00010300'}]
+
+
 def check_bounded_jump_table_discovery():
     data, entry, table, cases, continuation = make_bounded_switch()
     found = MOD._find_jump_table_targets(
@@ -3931,6 +4000,8 @@ def main():
     check_return_adjacent_scheduled_frames()
     check_composite_call_boundaries()
     check_bounded_jump_table_discovery()
+    check_psyq_rodata_jump_table_discovery()
+    check_table_ranges_follow_the_segment_view()
     check_scheduled_jump_table_discovery()
     check_static_discovery_provenance()
     check_static_dispatch_provenance()

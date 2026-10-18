@@ -654,6 +654,50 @@ def eligible_ranges(source, lo, hi):
     return ranges
 
 
+def verified_data_ranges(matches):
+    """A record's byte-verified excluded intervals: original data, never code.
+
+    eligible_ranges() has already checked each interval's SHA-256 against the
+    source bytes, so a switch table read from one is the original table."""
+    ranges = sorted((max(number(item['start']), lo), min(number(item['end']), hi))
+                    for source, lo, hi in matches
+                    for item in source['spec'].get('excluded_ranges', []))
+    return [(lo, hi) for lo, hi in ranges if lo < hi]
+
+
+def declare_switch_cases(record, bounds, tables):
+    """Declare every case label of a proven switch as a static dispatch entry.
+
+    A computed ``jr`` into a case re-enters the host function through the
+    dispatcher, which finds the label only if it is a dispatch entry (an
+    interior alias of its host). Labels that are block leaders for another
+    reason worked already; a case reached only by the table or by
+    fallthrough did not, and ran on the interpreter. The proof is the same
+    structural one compile_overlays makes, with the table allowed in the
+    record's verified data (``tables``) and every target inside ``bounds``."""
+    data = base64.b64decode(record['bytes_b64'], validate=True)
+    load = number(record['load_addr'])
+    inside = lambda pc: any(lo <= pc < hi for lo, hi in bounds)
+    roots = sorted({number(pc) for pc in record.get('function_entry_pcs', []) if inside(number(pc))})
+    targets, proofs = set(), {}
+    for index, root in enumerate(roots):
+        hard_cap = roots[index + 1] if index + 1 < len(roots) else load + len(data)
+        walk = compiler._walk_overlay_function(data, load, len(data), root, hard_cap,
+                                               bounds, False, tables)
+        targets |= {pc for pc in walk['jump_table_targets'] if inside(pc)}
+        for proof in walk['jump_table_proofs']:
+            proofs[proof['jr_pc']] = proof
+    if not targets:
+        return
+    for key in ('dispatch_entry_pcs', 'static_dispatch_entry_pcs'):
+        record[key] = [hex(pc) for pc in sorted(targets | {number(pc) for pc in record.get(key, [])})]
+    known = {number(p['jr_pc']) for p in record.get('static_jump_table_proofs', [])}
+    record['static_jump_table_proofs'] = record.get('static_jump_table_proofs', []) + [
+        dict(host_entry=hex(p['host_entry']), jr_pc=hex(p['jr_pc']), table_base=hex(p['table_base']),
+             count=p['count'], targets=[hex(t) for t in p['targets']])
+        for pc, p in sorted(proofs.items()) if pc not in known]
+
+
 def mod_package_views(profile, disc, project_root):
     """One verified view per declared mod package selection."""
     views = {}
@@ -771,6 +815,11 @@ def prepare(profile, disc, records, output, views=None):
             names = ['BIOS resident manifest']
             bounds = [(number(r['start']), number(r['end'])) for r in record['producer_ranges']]
         require(bounds, 'No established producer bounds')
+        if record.get('producer') != 'bios_resident_manifest':
+            tables = verified_data_ranges(matches)
+            if tables:
+                record['table_ranges'] = [dict(start=hex(lo), end=hex(hi)) for lo, hi in tables]
+            declare_switch_cases(record, bounds, tables)
         covered.update(names)
         record['guard_bytes'] = 0
         record['producer_ranges'] = [dict(start=hex(lo), end=hex(hi)) for lo, hi in bounds]
