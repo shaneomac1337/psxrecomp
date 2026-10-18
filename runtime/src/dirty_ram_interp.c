@@ -3058,9 +3058,15 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
 #ifdef PSX_HAS_OVERLAY_DISPATCH
     {
         extern int psx_overlay_dispatch(CPUState *cpu, uint32_t addr);
+        extern int overlay_loader_get_native_exec(void);
         int previous_phase = g_exec_phase;
         g_exec_phase = 3;
-        int handled = !forced && psx_overlay_dispatch(cpu, addr);
+        /* Native overlay execution off (PSX_OVERLAY_NATIVE_OFF / the
+         * overlay_native_off command) means every overlay runs on the
+         * interpreter, static shards included: that is the pristine
+         * interpreter reference those switches exist to capture. */
+        int handled = !forced && overlay_loader_get_native_exec() &&
+                      psx_overlay_dispatch(cpu, addr);
         g_exec_phase = previous_phase;
         if (handled) return 1;
     }
